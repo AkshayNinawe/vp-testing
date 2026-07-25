@@ -3,12 +3,14 @@ import express from 'express';
 import cors from 'cors';
 import { randomUUID } from 'crypto';
 import {
+  connectDb,
   findJobById,
   findUserById,
   findUserByUsername,
-  readDb,
-  updateJobs,
-  updateUsers,
+  insertJob,
+  insertUser,
+  listJobs,
+  updateJobById,
 } from './db';
 import {
   authRoleToUserRole,
@@ -31,9 +33,33 @@ import type {
 
 const app = express();
 const PORT = Number(process.env.PORT || 4000);
+const CORS_ORIGINS = (process.env.CORS_ORIGINS || process.env.APP_URL || 'http://localhost:3000')
+  .split(',')
+  .map(origin => origin.trim())
+  .filter(Boolean);
 
-app.use(cors({ origin: true, credentials: true }));
+app.use(
+  cors({
+    origin(origin, callback) {
+      if (!origin) return callback(null, true);
+      const allowed =
+        CORS_ORIGINS.includes('*') ||
+        CORS_ORIGINS.includes(origin) ||
+        origin.includes('localhost') ||
+        origin.includes('127.0.0.1') ||
+        origin.includes('test.apivishvaspower.com') ||
+        origin.includes('vishwaspower.in') ||
+        origin.includes('apivishvaspower.com');
+      if (allowed) return callback(null, true);
+      return callback(null, false);
+    },
+    credentials: true,
+  })
+);
 app.use(express.json({ limit: '5mb' }));
+
+const api = express.Router();
+const API_BASE_PATH = (process.env.API_BASE_PATH || '').replace(/\/$/, '');
 
 const AUTH_ROLES: AuthRole[] = ['Tester', 'Reviewer', 'Authorizer'];
 const CAPACITIES: TransformerCapacity[] = ['8MVA', '12.3MVA', '16.5MVA'];
@@ -56,11 +82,11 @@ const isReportable = (name: string) => {
   );
 };
 
-app.get('/api/health', (_req, res) => {
-  res.json({ ok: true, service: 'volttrack-api' });
+api.get('/health', async (_req, res) => {
+  res.json({ ok: true, service: 'volttrack-api', db: 'mongodb' });
 });
 
-app.post('/api/auth/register', async (req, res) => {
+api.post('/auth/register', async (req, res) => {
   try {
     const name = String(req.body?.name || '').trim();
     const username = String(req.body?.username || '').trim().toLowerCase();
@@ -76,7 +102,7 @@ app.post('/api/auth/register', async (req, res) => {
     if (!AUTH_ROLES.includes(role)) {
       return res.status(400).json({ error: 'Role must be Tester, Reviewer, or Authorizer' });
     }
-    if (findUserByUsername(username)) {
+    if (await findUserByUsername(username)) {
       return res.status(409).json({ error: 'Username already exists' });
     }
 
@@ -89,7 +115,7 @@ app.post('/api/auth/register', async (req, res) => {
       role,
       createdAt: Date.now(),
     };
-    updateUsers(users => [...users, user]);
+    await insertUser(user);
     return res.status(201).json({ user: toPublicUser(user) });
   } catch (err) {
     console.error(err);
@@ -97,7 +123,7 @@ app.post('/api/auth/register', async (req, res) => {
   }
 });
 
-app.post('/api/auth/login', async (req, res) => {
+api.post('/auth/login', async (req, res) => {
   try {
     const username = String(req.body?.username || '').trim().toLowerCase();
     const password = String(req.body?.password || '');
@@ -107,7 +133,7 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(400).json({ error: 'Username, password, and role are required' });
     }
 
-    const user = findUserByUsername(username);
+    const user = await findUserByUsername(username);
     if (!user || user.role !== role) {
       return res.status(401).json({ error: `Invalid credentials for ${role}` });
     }
@@ -129,77 +155,96 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 
-app.get('/api/auth/me', requireAuth, (req: AuthedRequest, res) => {
-  const user = findUserById(req.auth!.userId);
-  if (!user) return res.status(401).json({ error: 'User not found' });
-  return res.json({
-    user: toPublicUser(user),
-    userRole: authRoleToUserRole(user.role),
-  });
+api.get('/auth/me', requireAuth, async (req: AuthedRequest, res) => {
+  try {
+    const user = await findUserById(req.auth!.userId);
+    if (!user) return res.status(401).json({ error: 'User not found' });
+    return res.json({
+      user: toPublicUser(user),
+      userRole: authRoleToUserRole(user.role),
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: 'Failed to load profile' });
+  }
 });
 
-app.post('/api/auth/logout', requireAuth, (_req, res) => {
+api.post('/auth/logout', requireAuth, (_req, res) => {
   return res.status(204).send();
 });
 
-app.get('/api/jobs', requireAuth, (_req, res) => {
-  const jobs = readDb().jobs.slice().sort((a, b) => b.createdAt - a.createdAt);
-  return res.json({ jobs });
-});
-
-app.get('/api/jobs/:jobId', requireAuth, (req, res) => {
-  const job = findJobById(req.params.jobId);
-  if (!job) return res.status(404).json({ error: 'Job not found' });
-  return res.json({ job });
-});
-
-app.post('/api/jobs', requireAuth, (req, res) => {
-  const name = String(req.body?.name || '').trim();
-  const capacity = req.body?.capacity as TransformerCapacity;
-  const type = req.body?.type as TransformerType;
-
-  if (!name) return res.status(400).json({ error: 'Job name is required' });
-  if (!CAPACITIES.includes(capacity)) return res.status(400).json({ error: 'Invalid capacity' });
-  if (!TYPES.includes(type)) return res.status(400).json({ error: 'Invalid type' });
-
-  const job = createJob({ name, capacity, type });
-  updateJobs(jobs => [job, ...jobs]);
-  return res.status(201).json({ job });
-});
-
-app.patch('/api/jobs/:jobId/rating', requireAuth, (req, res) => {
-  const ratingData = req.body?.ratingData;
-  if (!ratingData || typeof ratingData !== 'object') {
-    return res.status(400).json({ error: 'ratingData object is required' });
+api.get('/jobs', requireAuth, async (_req, res) => {
+  try {
+    const jobs = await listJobs();
+    return res.json({ jobs });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: 'Failed to load jobs' });
   }
-
-  let updated: Job | null = null;
-  updateJobs(jobs =>
-    jobs.map(job => {
-      if (job.id !== req.params.jobId) return job;
-      updated = { ...job, ratingData: { ...(ratingData as Record<string, string>) } };
-      return updated;
-    })
-  );
-
-  if (!updated) return res.status(404).json({ error: 'Job not found' });
-  return res.json({ job: updated });
 });
 
-app.patch('/api/jobs/:jobId/tests/:testId/observation', requireAuth, (req: AuthedRequest, res) => {
-  const observationData = req.body?.observationData;
-  if (!observationData || typeof observationData !== 'object') {
-    return res.status(400).json({ error: 'observationData object is required' });
+api.get('/jobs/:jobId', requireAuth, async (req, res) => {
+  try {
+    const job = await findJobById(req.params.jobId);
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+    return res.json({ job });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: 'Failed to load job' });
   }
+});
 
-  const role = req.userRole!;
-  let updatedJob: Job | null = null;
-  let updatedTest: TransformerTest | null = null;
-  let denied = false;
+api.post('/jobs', requireAuth, async (req, res) => {
+  try {
+    const name = String(req.body?.name || '').trim();
+    const capacity = req.body?.capacity as TransformerCapacity;
+    const type = req.body?.type as TransformerType;
 
-  updateJobs(jobs =>
-    jobs.map(job => {
-      if (job.id !== req.params.jobId) return job;
+    if (!name) return res.status(400).json({ error: 'Job name is required' });
+    if (!CAPACITIES.includes(capacity)) return res.status(400).json({ error: 'Invalid capacity' });
+    if (!TYPES.includes(type)) return res.status(400).json({ error: 'Invalid type' });
+
+    const job = createJob({ name, capacity, type });
+    await insertJob(job);
+    return res.status(201).json({ job });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: 'Failed to create job' });
+  }
+});
+
+api.patch('/jobs/:jobId/rating', requireAuth, async (req, res) => {
+  try {
+    const ratingData = req.body?.ratingData;
+    if (!ratingData || typeof ratingData !== 'object') {
+      return res.status(400).json({ error: 'ratingData object is required' });
+    }
+
+    const updated = await updateJobById(req.params.jobId, job => ({
+      ...job,
+      ratingData: { ...(ratingData as Record<string, string>) },
+    }));
+
+    if (!updated) return res.status(404).json({ error: 'Job not found' });
+    return res.json({ job: updated });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: 'Failed to update rating' });
+  }
+});
+
+api.patch('/jobs/:jobId/tests/:testId/observation', requireAuth, async (req: AuthedRequest, res) => {
+  try {
+    const observationData = req.body?.observationData;
+    if (!observationData || typeof observationData !== 'object') {
+      return res.status(400).json({ error: 'observationData object is required' });
+    }
+
+    const role = req.userRole!;
+    let updatedTest: TransformerTest | null = null;
+    let denied = false;
+
+    const updatedJob = await updateJobById(req.params.jobId, job => {
       const tests = job.tests.map(test => {
         if (test.id !== req.params.testId) return test;
 
@@ -218,35 +263,38 @@ app.patch('/api/jobs/:jobId/tests/:testId/observation', requireAuth, (req: Authe
         };
         return updatedTest;
       });
-      updatedJob = { ...job, tests };
-      return updatedJob;
-    })
-  );
 
-  if (denied) return res.status(403).json({ error: 'Test is locked for your role' });
-  if (!updatedJob || !updatedTest) return res.status(404).json({ error: 'Job or test not found' });
-  return res.json({ job: updatedJob, test: updatedTest });
+      if (!updatedTest && !denied) return null;
+      return { ...job, tests };
+    });
+
+    if (denied) return res.status(403).json({ error: 'Test is locked for your role' });
+    if (!updatedJob || !updatedTest) return res.status(404).json({ error: 'Job or test not found' });
+    return res.json({ job: updatedJob, test: updatedTest });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: 'Failed to save observations' });
+  }
 });
 
-app.patch('/api/jobs/:jobId/tests/:testId/stage', requireAuth, (req: AuthedRequest, res) => {
-  const targetStage = req.body?.stage as TestStage;
-  const action = (req.body?.action as 'promote' | 'reject') || 'promote';
-  const role = req.userRole!;
+api.patch('/jobs/:jobId/tests/:testId/stage', requireAuth, async (req: AuthedRequest, res) => {
+  try {
+    const targetStage = req.body?.stage as TestStage;
+    const action = (req.body?.action as 'promote' | 'reject') || 'promote';
+    const role = req.userRole!;
 
-  if (!['Not Started', 'Tested', 'Reviewed', 'Authorized'].includes(targetStage)) {
-    return res.status(400).json({ error: 'Invalid stage' });
-  }
+    if (!['Not Started', 'Tested', 'Reviewed', 'Authorized'].includes(targetStage)) {
+      return res.status(400).json({ error: 'Invalid stage' });
+    }
 
-  let updatedJob: Job | null = null;
-  let error: string | null = null;
-  let openedTestId: string | null = null;
+    let error: string | null = null;
+    let openedTestId: string | null = null;
+    let touched = false;
 
-  updateJobs(jobs =>
-    jobs.map(job => {
-      if (job.id !== req.params.jobId) return job;
-
+    const updatedJob = await updateJobById(req.params.jobId, job => {
       const tests = job.tests.map(test => {
         if (test.id !== req.params.testId) return test;
+        touched = true;
 
         if (action === 'promote') {
           const canPromote =
@@ -311,7 +359,6 @@ app.patch('/api/jobs/:jobId/tests/:testId/stage', requireAuth, (req: AuthedReque
           };
         }
 
-        // reject / demote
         if (role === 'Admin_Tested') {
           error = 'Testers cannot reject stages';
           return test;
@@ -352,72 +399,90 @@ app.patch('/api/jobs/:jobId/tests/:testId/stage', requireAuth, (req: AuthedReque
         };
       });
 
-      if (error) return job;
-      updatedJob = {
+      if (error || !touched) return null;
+      return {
         ...job,
         tests,
         status: recomputeJobStatus(tests),
       };
-      return updatedJob;
-    })
-  );
+    });
 
-  if (error) return res.status(403).json({ error });
-  if (!updatedJob) return res.status(404).json({ error: 'Job or test not found' });
-  return res.json({ job: updatedJob, openTestId: openedTestId });
+    if (error) return res.status(403).json({ error });
+    if (!updatedJob) return res.status(404).json({ error: 'Job or test not found' });
+    return res.json({ job: updatedJob, openTestId: openedTestId });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: 'Failed to update stage' });
+  }
 });
 
-app.patch('/api/jobs/:jobId/tests/:testId/accept', requireAuth, (req: AuthedRequest, res) => {
-  if (req.userRole === 'Admin_Tested') {
-    return res.status(403).json({ error: 'Testers cannot accept test offers' });
-  }
+api.patch('/jobs/:jobId/tests/:testId/accept', requireAuth, async (req: AuthedRequest, res) => {
+  try {
+    if (req.userRole === 'Admin_Tested') {
+      return res.status(403).json({ error: 'Testers cannot accept test offers' });
+    }
 
-  let updatedJob: Job | null = null;
-  let updatedTest: TransformerTest | null = null;
-
-  updateJobs(jobs =>
-    jobs.map(job => {
-      if (job.id !== req.params.jobId) return job;
+    let updatedTest: TransformerTest | null = null;
+    const updatedJob = await updateJobById(req.params.jobId, job => {
       const tests = job.tests.map(test => {
         if (test.id !== req.params.testId) return test;
         updatedTest = { ...test, accepted: true, updatedAt: Date.now() };
         return updatedTest;
       });
-      updatedJob = { ...job, tests };
-      return updatedJob;
-    })
-  );
+      if (!updatedTest) return null;
+      return { ...job, tests };
+    });
 
-  if (!updatedJob || !updatedTest) return res.status(404).json({ error: 'Job or test not found' });
-  return res.json({ job: updatedJob, test: updatedTest });
+    if (!updatedJob || !updatedTest) return res.status(404).json({ error: 'Job or test not found' });
+    return res.json({ job: updatedJob, test: updatedTest });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: 'Failed to accept test' });
+  }
 });
 
-app.post('/api/jobs/:jobId/tests/accept-all', requireAuth, (req: AuthedRequest, res) => {
-  if (req.userRole === 'Admin_Tested') {
-    return res.status(403).json({ error: 'Testers cannot accept test offers' });
-  }
+api.post('/jobs/:jobId/tests/accept-all', requireAuth, async (req: AuthedRequest, res) => {
+  try {
+    if (req.userRole === 'Admin_Tested') {
+      return res.status(403).json({ error: 'Testers cannot accept test offers' });
+    }
 
-  let updatedJob: Job | null = null;
-  updateJobs(jobs =>
-    jobs.map(job => {
-      if (job.id !== req.params.jobId) return job;
+    const updatedJob = await updateJobById(req.params.jobId, job => {
       const tests = job.tests.map(test =>
         test.accepted === false ? { ...test, accepted: true, updatedAt: Date.now() } : test
       );
-      updatedJob = { ...job, tests };
-      return updatedJob;
-    })
-  );
+      return { ...job, tests };
+    });
 
-  if (!updatedJob) return res.status(404).json({ error: 'Job not found' });
-  return res.json({ job: updatedJob });
+    if (!updatedJob) return res.status(404).json({ error: 'Job not found' });
+    return res.json({ job: updatedJob });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: 'Failed to accept tests' });
+  }
 });
+
+app.use('/api', api);
+if (API_BASE_PATH) {
+  app.use(`${API_BASE_PATH}/api`, api);
+}
 
 app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   console.error(err);
   res.status(500).json({ error: 'Internal server error' });
 });
 
-app.listen(PORT, () => {
-  console.log(`VoltTrack API running on http://localhost:${PORT}`);
-});
+async function start() {
+  try {
+    await connectDb();
+    app.listen(PORT, () => {
+      console.log(`VoltTrack API running on http://localhost:${PORT}`);
+      if (API_BASE_PATH) console.log(`Also mounted at ${API_BASE_PATH}/api`);
+    });
+  } catch (err) {
+    console.error('Failed to start server:', err);
+    process.exit(1);
+  }
+}
+
+start();

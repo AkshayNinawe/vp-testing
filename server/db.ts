@@ -1,69 +1,103 @@
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
-import type { DatabaseShape, Job, AuthUser } from './types';
+import { MongoClient, type Collection, type Db } from 'mongodb';
+import type { AuthUser, Job } from './types';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const DATA_DIR = path.join(__dirname, '..', 'data');
-const DB_PATH = process.env.DATABASE_PATH
-  ? path.resolve(process.env.DATABASE_PATH)
-  : path.join(DATA_DIR, 'volttrack.json');
+const MONGODB_URI =
+  process.env.MONGO_URL ||
+  process.env.MONGODB_URI ||
+  'mongodb://127.0.0.1:27017/volttrack';
 
-const emptyDb = (): DatabaseShape => ({ users: [], jobs: [] });
-
-function ensureDbFile() {
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-  }
-  if (!fs.existsSync(DB_PATH)) {
-    fs.writeFileSync(DB_PATH, JSON.stringify(emptyDb(), null, 2), 'utf8');
-  }
-}
-
-export function readDb(): DatabaseShape {
-  ensureDbFile();
+function resolveDbName(uri: string) {
+  if (process.env.MONGODB_DB) return process.env.MONGODB_DB;
   try {
-    const raw = fs.readFileSync(DB_PATH, 'utf8');
-    const parsed = JSON.parse(raw) as DatabaseShape;
-    return {
-      users: Array.isArray(parsed.users) ? parsed.users : [],
-      jobs: Array.isArray(parsed.jobs) ? parsed.jobs : [],
-    };
+    const pathname = new URL(uri).pathname.replace(/^\//, '');
+    if (pathname) return pathname.split('?')[0];
   } catch {
-    return emptyDb();
+    // ignore invalid URL parsing for non-standard URIs
   }
+  return 'volttrack';
 }
 
-export function writeDb(db: DatabaseShape) {
-  ensureDbFile();
-  const tmp = `${DB_PATH}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(db, null, 2), 'utf8');
-  fs.renameSync(tmp, DB_PATH);
+const DB_NAME = resolveDbName(MONGODB_URI);
+
+let client: MongoClient | null = null;
+let db: Db | null = null;
+
+export async function connectDb() {
+  if (db) return db;
+  client = new MongoClient(MONGODB_URI);
+  await client.connect();
+  db = client.db(DB_NAME);
+
+  await users().createIndex({ username: 1 }, { unique: true });
+  await users().createIndex({ id: 1 }, { unique: true });
+  await jobs().createIndex({ id: 1 }, { unique: true });
+  await jobs().createIndex({ createdAt: -1 });
+
+  console.log(`MongoDB connected: ${DB_NAME}`);
+  return db;
 }
 
-export function updateUsers(mutator: (users: AuthUser[]) => AuthUser[]) {
-  const db = readDb();
-  db.users = mutator(db.users);
-  writeDb(db);
-  return db.users;
+function getDb() {
+  if (!db) throw new Error('Database not connected. Call connectDb() first.');
+  return db;
 }
 
-export function updateJobs(mutator: (jobs: Job[]) => Job[]) {
-  const db = readDb();
-  db.jobs = mutator(db.jobs);
-  writeDb(db);
-  return db.jobs;
+function users(): Collection<AuthUser> {
+  return getDb().collection<AuthUser>('users');
 }
 
-export function findUserByUsername(username: string) {
-  return readDb().users.find(u => u.username.toLowerCase() === username.toLowerCase()) || null;
+function jobs(): Collection<Job> {
+  return getDb().collection<Job>('jobs');
 }
 
-export function findUserById(id: string) {
-  return readDb().users.find(u => u.id === id) || null;
+function stripMongoId<T extends object>(doc: T & { _id?: unknown }): T {
+  const { _id, ...rest } = doc as T & { _id?: unknown };
+  return rest as T;
 }
 
-export function findJobById(id: string) {
-  return readDb().jobs.find(j => j.id === id) || null;
+export async function findUserByUsername(username: string): Promise<AuthUser | null> {
+  const user = await users().findOne({ username: username.toLowerCase() });
+  return user ? stripMongoId(user) : null;
+}
+
+export async function findUserById(id: string): Promise<AuthUser | null> {
+  const user = await users().findOne({ id });
+  return user ? stripMongoId(user) : null;
+}
+
+export async function insertUser(user: AuthUser): Promise<AuthUser> {
+  await users().insertOne({ ...user });
+  return user;
+}
+
+export async function listJobs(): Promise<Job[]> {
+  const docs = await jobs().find({}).sort({ createdAt: -1 }).toArray();
+  return docs.map(doc => stripMongoId(doc));
+}
+
+export async function findJobById(id: string): Promise<Job | null> {
+  const job = await jobs().findOne({ id });
+  return job ? stripMongoId(job) : null;
+}
+
+export async function insertJob(job: Job): Promise<Job> {
+  await jobs().insertOne({ ...job });
+  return job;
+}
+
+export async function replaceJob(job: Job): Promise<Job | null> {
+  const result = await jobs().replaceOne({ id: job.id }, { ...job });
+  if (result.matchedCount === 0) return null;
+  return job;
+}
+
+export async function updateJobById(
+  jobId: string,
+  mutator: (job: Job) => Job | null
+): Promise<Job | null> {
+  const existing = await findJobById(jobId);
+  if (!existing) return null;
+  const next = mutator(existing);
+  if (!next) return null;
+  return replaceJob(next);
 }

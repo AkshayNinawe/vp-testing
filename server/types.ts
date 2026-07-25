@@ -41,8 +41,3 @@ export interface Job {
   tests: TransformerTest[];
   ratingData?: Record<string, string>;
 }
-
-export interface DatabaseShape {
-  users: AuthUser[];
-  jobs: Job[];
-}

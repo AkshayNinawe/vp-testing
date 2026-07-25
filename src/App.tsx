@@ -6561,7 +6561,12 @@ ${PDF_PRINT_STYLES}
       setToast({ message: `Logged in as ${result.user.name} (${result.user.role})`, type: 'success' });
       setView('DASHBOARD');
     } catch (err) {
-      setAuthError(err instanceof Error ? err.message : `Invalid credentials for ${authRole}.`);
+      const msg = err instanceof Error ? err.message : `Invalid credentials for ${authRole}.`;
+      setAuthError(
+        msg === 'Failed to fetch'
+          ? 'Cannot reach API at https://vishwaspower.in/testing. Deploy the VoltTrack backend there or update VITE_API_URL.'
+          : msg
+      );
     }
   };
 
@@ -6593,7 +6598,12 @@ ${PDF_PRINT_STYLES}
       setAuthError('');
       setToast({ message: `${authRole} account registered. Please login.`, type: 'success' });
     } catch (err) {
-      setAuthError(err instanceof Error ? err.message : 'Registration failed.');
+      const msg = err instanceof Error ? err.message : 'Registration failed.';
+      setAuthError(
+        msg === 'Failed to fetch'
+          ? 'Cannot reach API at https://vishwaspower.in/testing. Deploy the VoltTrack backend there or update VITE_API_URL.'
+          : msg
+      );
     }
   };
 

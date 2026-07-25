@@ -27,4 +27,6 @@ Or separately:
 - `npm run dev` — frontend only (proxies `/api` → `:4000`)
 
 ### Auth roles
-Register/login as **Tester**, **Reviewer**, or **Authorizer**. Passwords are hashed and stored in `data/volttrack.json`.
+Register/login as **Tester**, **Reviewer**, or **Authorizer**. Passwords are hashed in MongoDB (`users` collection).
+
+Set `MONGODB_URI` in `.env` (default: `mongodb://127.0.0.1:27017/volttrack`).

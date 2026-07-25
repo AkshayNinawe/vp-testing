@@ -43,4 +43,15 @@ Roles: `Tester` | `Reviewer` | `Authorizer`
 
 ## Storage
 
-JSON file at `data/volttrack.json` (passwords hashed with bcrypt).
+MongoDB collections:
+- `users`
+- `jobs`
+
+Configure with:
+
+```
+MONGODB_URI=mongodb://127.0.0.1:27017/volttrack
+MONGODB_DB=volttrack
+```
+
+For Atlas, put your connection string in `.env` as `MONGODB_URI`.
