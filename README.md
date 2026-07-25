@@ -15,6 +15,16 @@ View your app in AI Studio: https://ai.studio/apps/b87f23a1-3723-43c8-980b-e280c
 
 1. Install dependencies:
    `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+2. Copy `.env.example` to `.env` (JWT/API settings are included)
+3. Run backend + frontend together:
+   `npm run dev:all`
+
+- Frontend: http://localhost:3000
+- API: http://localhost:4000
+
+Or separately:
+- `npm run dev:server` — API only
+- `npm run dev` — frontend only (proxies `/api` → `:4000`)
+
+### Auth roles
+Register/login as **Tester**, **Reviewer**, or **Authorizer**. Passwords are hashed and stored in `data/volttrack.json`.

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, createContext, useContext } from 'react';
+import React, { useState, useEffect, useRef, createContext, useContext } from 'react';
 import { 
   LogIn, 
   Settings, 
@@ -30,7 +30,7 @@ import {
   Check
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { AppView, Job, TransformerCapacity, TransformerType, TransformerTest, TestStage, JobStatus, UserRole } from './types';
+import { AppView, Job, TransformerCapacity, TransformerType, TransformerTest, TestStage, JobStatus, UserRole, AuthRole, AuthUser } from './types';
 import { getTestFormHtml } from './reportTemplates';
 import { getCTConfig, getRatioAppliedPrimary, seedCTNameplateDefaults } from './ctTestConfig';
 import { getPreConnWindingResMaxGuaranteed, seedPreConnWindingResGuaranteed } from './preConnectionTestConfig';
@@ -38,9 +38,15 @@ import { calculatePostConnScImpedanceZ, getPostConnWindingResMaxGuaranteed, seed
 import { calculatePostTankingScImpedanceZ, getPostTankingWindingResMaxGuaranteed, seedPostTankingWindingResGuaranteed } from './postTankingTestConfig';
 import { calculateFinalLvScImpedanceZ, getFinalLvWindingResMaxGuaranteed, seedFinalLvWindingResGuaranteed } from './finalLvTestConfig';
 import { applyHVLLCalculations, getHVLLConfig, getHVNllGuaranteedCurrent, getHVNllGuaranteedPower, seedHVTestListDefaults } from './hvTestListConfig';
+import { api } from './api';
 
-// Storage Key
-const JOBS_STORAGE_KEY = 'volttrack_jobs_v3';
+const AUTH_ROLES: AuthRole[] = ['Tester', 'Reviewer', 'Authorizer'];
+
+const userRoleToAuthRole = (role: UserRole): AuthRole => {
+  if (role === 'Admin_Reviewed') return 'Reviewer';
+  if (role === 'Admin_Authorized') return 'Authorizer';
+  return 'Tester';
+};
 
 const TEST_NAMES = [
   'CT TEST',
@@ -5788,6 +5794,14 @@ export default function App() {
   const [view, setView] = useState<AppView>('LOGIN');
   const [jobs, setJobs] = useState<Job[]>([]);
   const [currentRole, setCurrentRole] = useState<UserRole>('Admin_Tested');
+  const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
+  const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
+  const [authName, setAuthName] = useState('');
+  const [authUsername, setAuthUsername] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authConfirmPassword, setAuthConfirmPassword] = useState('');
+  const [authRole, setAuthRole] = useState<AuthRole>('Tester');
+  const [authError, setAuthError] = useState('');
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<JobStatus>('Processing');
   const [filterCapacity, setFilterCapacity] = useState<string>('All');
@@ -5798,22 +5812,44 @@ export default function App() {
   }>({});
   const [jobName, setJobName] = useState('');
 
-  // Load jobs from local storage
+  // Restore session + load jobs from API
   useEffect(() => {
-    const savedJobs = localStorage.getItem(JOBS_STORAGE_KEY);
-    if (savedJobs) {
+    let cancelled = false;
+
+    const boot = async () => {
+      if (!api.getToken()) return;
       try {
-        setJobs(JSON.parse(savedJobs));
-      } catch (e) {
-        console.error('Failed to parse jobs', e);
+        const me = await api.me();
+        if (cancelled) return;
+        setCurrentUser(me.user);
+        setCurrentRole(me.userRole);
+        setView('DASHBOARD');
+        const { jobs: remoteJobs } = await api.listJobs();
+        if (!cancelled) setJobs(remoteJobs);
+      } catch {
+        api.setToken(null);
+        if (!cancelled) {
+          setCurrentUser(null);
+          setView('LOGIN');
+        }
       }
-    }
+    };
+
+    boot();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
-  // Save jobs to local storage
-  useEffect(() => {
-    localStorage.setItem(JOBS_STORAGE_KEY, JSON.stringify(jobs));
-  }, [jobs]);
+  const upsertJob = (job: Job) => {
+    setJobs(prev => {
+      const exists = prev.some(j => j.id === job.id);
+      if (!exists) return [job, ...prev];
+      return prev.map(j => (j.id === job.id ? job : j));
+    });
+  };
+
+  const observationSaveTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
 
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'info' | 'error' } | null>(null);
 
@@ -6497,7 +6533,85 @@ ${PDF_PRINT_STYLES}
     });
   };
 
-  const handleLogin = () => setView('DASHBOARD');
+  const resetAuthForm = () => {
+    setAuthName('');
+    setAuthUsername('');
+    setAuthPassword('');
+    setAuthConfirmPassword('');
+    setAuthRole('Tester');
+    setAuthError('');
+  };
+
+  const handleLogin = async () => {
+    const username = authUsername.trim().toLowerCase();
+    const password = authPassword;
+    if (!username || !password) {
+      setAuthError('Enter username and password.');
+      return;
+    }
+
+    try {
+      const result = await api.login({ username, password, role: authRole });
+      api.setToken(result.token);
+      setCurrentUser(result.user);
+      setCurrentRole(result.userRole);
+      const { jobs: remoteJobs } = await api.listJobs();
+      setJobs(remoteJobs);
+      resetAuthForm();
+      setToast({ message: `Logged in as ${result.user.name} (${result.user.role})`, type: 'success' });
+      setView('DASHBOARD');
+    } catch (err) {
+      setAuthError(err instanceof Error ? err.message : `Invalid credentials for ${authRole}.`);
+    }
+  };
+
+  const handleRegister = async () => {
+    const name = authName.trim();
+    const username = authUsername.trim().toLowerCase();
+    const password = authPassword;
+    const confirmPassword = authConfirmPassword;
+
+    if (!name || !username || !password) {
+      setAuthError('Name, username, and password are required.');
+      return;
+    }
+    if (password.length < 4) {
+      setAuthError('Password must be at least 4 characters.');
+      return;
+    }
+    if (password !== confirmPassword) {
+      setAuthError('Passwords do not match.');
+      return;
+    }
+
+    try {
+      await api.register({ name, username, password, role: authRole });
+      setAuthMode('login');
+      setAuthPassword('');
+      setAuthConfirmPassword('');
+      setAuthName('');
+      setAuthError('');
+      setToast({ message: `${authRole} account registered. Please login.`, type: 'success' });
+    } catch (err) {
+      setAuthError(err instanceof Error ? err.message : 'Registration failed.');
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await api.logout();
+    } catch {
+      // ignore network logout failures
+    }
+    api.setToken(null);
+    setCurrentUser(null);
+    setCurrentRole('Admin_Tested');
+    setJobs([]);
+    resetAuthForm();
+    setAuthMode('login');
+    setView('LOGIN');
+  };
+
   const handleStartWorkflow = () => setView('SELECT_TYPE');
   
   const handleSelectType = (type: TransformerType) => {
@@ -6513,202 +6627,145 @@ ${PDF_PRINT_STYLES}
     setView('NAME_JOB');
   };
 
-  const handleSaveJob = () => {
-    if (!jobName.trim()) return;
-    
-    const initialTests: TransformerTest[] = TEST_NAMES.map(name => ({
-      id: crypto.randomUUID(),
-      name,
-      stage: 'Not Started',
-      accepted: false,
-      updatedAt: Date.now(),
-      ...(name === 'CT TEST' && currentSelection.type === 'Auto' && (currentSelection.capacity === '12.3MVA' || currentSelection.capacity === '16.5MVA')
-        ? { observationData: seedCTNameplateDefaults({}, currentSelection.type, currentSelection.capacity) }
-        : {})
-    }));
+  const handleSaveJob = async () => {
+    if (!jobName.trim() || !currentSelection.type || !currentSelection.capacity) return;
 
-    const matches = jobName.match(/\d+/g);
-    const jobNumber = matches && matches.length > 0 ? matches[matches.length - 1] : '';
-    const autoSrNo = jobNumber ? `V/M/${jobNumber}` : '';
+    try {
+      const { job } = await api.createJob({
+        name: jobName.trim(),
+        type: currentSelection.type,
+        capacity: currentSelection.capacity,
+      });
 
-    const ratingDefaults = getJobRatingDefaults(currentSelection.type!, currentSelection.capacity!);
-    const shouldUseFixedAuto165SrNo = currentSelection.type === 'Auto' && currentSelection.capacity === '16.5MVA';
-    const newJob: Job = {
-      id: crypto.randomUUID(),
-      name: jobName,
-      capacity: currentSelection.capacity!,
-      type: currentSelection.type!,
-      createdAt: Date.now(),
-      status: 'Processing',
-      tests: initialTests,
-      ratingData: {
-        ...ratingDefaults,
-        rating_sr_no: shouldUseFixedAuto165SrNo ? (ratingDefaults.rating_sr_no || '') : (autoSrNo || ratingDefaults.rating_sr_no || '')
+      if (job.type === 'Auto' && (job.capacity === '12.3MVA' || job.capacity === '16.5MVA')) {
+        const ctTest = job.tests.find(t => t.name === 'CT TEST');
+        if (ctTest) {
+          const seeded = seedCTNameplateDefaults({}, job.type, job.capacity);
+          const { job: seededJob } = await api.updateObservation(job.id, ctTest.id, seeded);
+          upsertJob(seededJob);
+        } else {
+          upsertJob(job);
+        }
+      } else {
+        upsertJob(job);
       }
-    };
 
-    setJobs(prev => [newJob, ...prev]);
-    setView('JOB_LIST');
-    // Clear selection
-    setCurrentSelection({});
-    setJobName('');
-  };
-
-  const handleUpdateTestStage = (jobId: string, testId: string, targetStage: TestStage) => {
-    setJobs(prev => prev.map(job => {
-      if (job.id !== jobId) return job;
-      
-      const updatedTests = job.tests.map(test => {
-        if (test.id !== testId) return test;
-        
-        // Authorization & Sequential Logic
-        const canPromote = (
-          (currentRole === 'Admin_Tested' && test.stage === 'Not Started' && targetStage === 'Tested') ||
-          (currentRole === 'Admin_Reviewed' && test.stage === 'Tested' && targetStage === 'Reviewed') ||
-          (currentRole === 'Admin_Authorized' && test.stage === 'Reviewed' && targetStage === 'Authorized')
-        );
-
-        if (!canPromote) return test;
-
-        let newObservationData = { ...(test.observationData || {}) };
-        const isReportable = test.name.toUpperCase() === 'CT TEST' || test.name.toUpperCase() === 'BUSHING TEST' || test.name.toUpperCase() === '2 KV TEST' || test.name.toUpperCase() === 'PRE-CONNECTION TEST' || test.name.toUpperCase() === 'POST-CONNECTION TEST' || test.name.toUpperCase() === 'PRE & POST VPD SERVICING' || test.name.toUpperCase().includes('OIL SOAKING') || test.name.toUpperCase() === 'POST-TANKING TEST' || test.name.toUpperCase() === 'FINAL LV TEST REPORT' || test.name.toUpperCase() === 'CHECKLIST FOR TFR BEFORE HV' || test.name.toUpperCase() === 'LIST OF HV TEST';
-
-        const now = new Date();
-        const nowString = now.toLocaleString();
-
-        // Automatically calculate post-connection signature dates if names are selected
-        if (test.name.toUpperCase() === 'POST-CONNECTION TEST') {
-          if (newObservationData.pct_tested_by && !newObservationData.pct_tested_date) {
-            newObservationData.pct_tested_date = nowString;
-          }
-          if (targetStage === 'Reviewed' || targetStage === 'Authorized') {
-            if (newObservationData.pct_reviewed_by && !newObservationData.pct_reviewed_date) {
-              newObservationData.pct_reviewed_date = nowString;
-            }
-          }
-          if (targetStage === 'Authorized') {
-            if (newObservationData.pct_authorized_by && !newObservationData.pct_authorized_date) {
-              newObservationData.pct_authorized_date = nowString;
-            }
-          }
-        }
-
-        if (targetStage === 'Tested' && isReportable) {
-          newObservationData = {
-            ...newObservationData,
-            tested_at: nowString,
-            tested_by: newObservationData.tested_by || ''
-          };
-          // Automatically open form for Test in next page
-          setEditingTestId(testId);
-          setView('TEST_REPORT');
-        }
-
-        if (targetStage === 'Reviewed' && isReportable) {
-          newObservationData = {
-            ...newObservationData,
-            reviewed_at: nowString,
-            reviewed_by: newObservationData.reviewed_by || ''
-          };
-        }
-
-        if (targetStage === 'Authorized' && isReportable) {
-          newObservationData = {
-            ...newObservationData,
-            authorized_at: nowString,
-            authorized_by: newObservationData.authorized_by || ''
-          };
-        }
-        
-        return { ...test, stage: targetStage, observationData: newObservationData, updatedAt: Date.now() };
+      setView('JOB_LIST');
+      setCurrentSelection({});
+      setJobName('');
+      setToast({ message: `Job ${job.name} created`, type: 'success' });
+    } catch (err) {
+      setToast({
+        message: err instanceof Error ? err.message : 'Failed to create job',
+        type: 'error',
       });
-
-      // Check if all tests are authorized
-      const allAuthorized = updatedTests.every(t => t.stage === 'Authorized');
-      const newStatus: JobStatus = allAuthorized ? 'Completed' : 'Processing';
-
-      return {
-        ...job,
-        status: newStatus,
-        tests: updatedTests
-      };
-    }));
+    }
   };
 
-  const handleRejectTestStage = (jobId: string, testId: string, targetStage: TestStage) => {
-    setJobs(prev => prev.map(job => {
-      if (job.id !== jobId) return job;
-      
-      const updatedTests = job.tests.map(test => {
-        if (test.id !== testId) return test;
-        
-        let newObservationData = { ...(test.observationData || {}) };
-        
-        if (targetStage === 'Tested') {
-          delete newObservationData.reviewed_at;
-          delete newObservationData.reviewed_by;
-        } else if (targetStage === 'Reviewed') {
-          delete newObservationData.authorized_at;
-          delete newObservationData.authorized_by;
-        } else if (targetStage === 'Not Started') {
-          delete newObservationData.tested_at;
-          delete newObservationData.tested_by;
-          delete newObservationData.reviewed_at;
-          delete newObservationData.reviewed_by;
-          delete newObservationData.authorized_at;
-          delete newObservationData.authorized_by;
-        }
-
-        return { ...test, stage: targetStage, observationData: newObservationData, updatedAt: Date.now() };
+  const handleUpdateTestStage = async (jobId: string, testId: string, targetStage: TestStage) => {
+    try {
+      const { job, openTestId } = await api.updateStage(jobId, testId, {
+        stage: targetStage,
+        action: 'promote',
       });
-
-      const allAuthorized = updatedTests.every(t => t.stage === 'Authorized');
-      const newStatus: JobStatus = allAuthorized ? 'Completed' : 'Processing';
-
-      return {
-        ...job,
-        status: newStatus,
-        tests: updatedTests
-      };
-    }));
+      upsertJob(job);
+      if (openTestId) {
+        setEditingTestId(openTestId);
+        setView('TEST_REPORT');
+      }
+    } catch (err) {
+      setToast({
+        message: err instanceof Error ? err.message : 'Stage update failed',
+        type: 'error',
+      });
+    }
   };
 
-  const handleAcceptTestOffer = (jobId: string, testId: string) => {
-    setJobs(prev => prev.map(job => {
-      if (job.id !== jobId) return job;
-      return {
-        ...job,
-        tests: job.tests.map(test => {
-          if (test.id !== testId) return test;
-          return { ...test, accepted: true, updatedAt: Date.now() };
-        })
-      };
-    }));
+  const handleRejectTestStage = async (jobId: string, testId: string, targetStage: TestStage) => {
+    try {
+      const { job } = await api.updateStage(jobId, testId, {
+        stage: targetStage,
+        action: 'reject',
+      });
+      upsertJob(job);
+      setToast({ message: `Rejected to ${targetStage}`, type: 'info' });
+    } catch (err) {
+      setToast({
+        message: err instanceof Error ? err.message : 'Reject failed',
+        type: 'error',
+      });
+    }
+  };
+
+  const handleAcceptTestOffer = async (jobId: string, testId: string) => {
+    try {
+      const { job } = await api.acceptTest(jobId, testId);
+      upsertJob(job);
+    } catch (err) {
+      setToast({
+        message: err instanceof Error ? err.message : 'Accept failed',
+        type: 'error',
+      });
+    }
+  };
+
+  const handleAcceptAllOffers = async (jobId: string) => {
+    try {
+      const { job } = await api.acceptAllTests(jobId);
+      upsertJob(job);
+      setToast({ message: 'All pending offers accepted', type: 'success' });
+    } catch (err) {
+      setToast({
+        message: err instanceof Error ? err.message : 'Accept all failed',
+        type: 'error',
+      });
+    }
   };
 
   const [editingTestId, setEditingTestId] = useState<string | null>(null);
 
-  const handleUpdateTestData = (jobId: string, testId: string, data: Record<string, string>) => {
+  const handleUpdateTestData = async (jobId: string, testId: string, data: Record<string, string>) => {
     setJobs(prev => prev.map(job => {
       if (job.id !== jobId) return job;
       return {
         ...job,
-        tests: job.tests.map(test => {
-          if (test.id !== testId) return test;
-          return { ...test, observationData: data, updatedAt: Date.now() };
-        })
+        tests: job.tests.map(test =>
+          test.id === testId
+            ? { ...test, observationData: data, updatedAt: Date.now() }
+            : test
+        ),
       };
     }));
+
+    const key = `${jobId}:${testId}`;
+    if (observationSaveTimers.current[key]) {
+      clearTimeout(observationSaveTimers.current[key]);
+    }
+    observationSaveTimers.current[key] = setTimeout(async () => {
+      try {
+        const { job } = await api.updateObservation(jobId, testId, data);
+        upsertJob(job);
+      } catch (err) {
+        setToast({
+          message: err instanceof Error ? err.message : 'Failed to save observations',
+          type: 'error',
+        });
+      }
+    }, 400);
   };
 
-  const handleUpdateJobRating = (jobId: string, data: Record<string, string>) => {
-    setJobs(prev => prev.map(job => {
-      if (job.id !== jobId) return job;
-      return {
-        ...job,
-        ratingData: data
-      };
-    }));
+  const handleUpdateJobRating = async (jobId: string, data: Record<string, string>) => {
+    setJobs(prev => prev.map(job => (job.id === jobId ? { ...job, ratingData: data } : job)));
+
+    try {
+      const { job } = await api.updateRating(jobId, data);
+      upsertJob(job);
+    } catch (err) {
+      setToast({
+        message: err instanceof Error ? err.message : 'Failed to save rating',
+        type: 'error',
+      });
+    }
   };
 
   const selectedJob = jobs.find(j => j.id === selectedJobId);
@@ -6760,21 +6817,24 @@ ${PDF_PRINT_STYLES}
               referrerPolicy="no-referrer"
             />
           </div>
-          <div className="flex items-center gap-2">
-            <span className="text-[10px] text-industrial-text-muted uppercase font-bold mr-2">Switch Admin Role:</span>
-            {(['Admin_Tested', 'Admin_Reviewed', 'Admin_Authorized'] as UserRole[]).map(role => (
-              <button
-                key={role}
-                onClick={() => setCurrentRole(role)}
-                className={`px-3 py-1 rounded-full text-[10px] font-bold uppercase transition-all border ${
-                  currentRole === role 
-                    ? 'bg-industrial-accent text-white border-industrial-accent' 
-                    : 'bg-white text-industrial-text-muted border-industrial-border hover:border-industrial-accent/30'
-                }`}
-              >
-                {role.replace('Admin_', '')}
-              </button>
-            ))}
+          <div className="flex items-center gap-3">
+            <div className="text-right">
+              <p className="text-[11px] font-bold text-industrial-text">
+                {currentUser?.name || 'Guest'}
+              </p>
+              <p className="text-[10px] text-industrial-text-muted uppercase font-bold tracking-wider">
+                {currentUser?.role || userRoleToAuthRole(currentRole)}
+              </p>
+            </div>
+            <span className="px-3 py-1 rounded-full text-[10px] font-bold uppercase border bg-industrial-accent text-white border-industrial-accent">
+              {currentUser?.role || userRoleToAuthRole(currentRole)}
+            </span>
+            <button
+              onClick={handleLogout}
+              className="px-3 py-1 rounded-full text-[10px] font-bold uppercase border bg-white text-industrial-text-muted border-industrial-border hover:border-red-300 hover:text-red-600 transition-all"
+            >
+              Logout
+            </button>
           </div>
         </div>
       )}
@@ -6789,7 +6849,7 @@ ${PDF_PRINT_STYLES}
             id="login-page"
             className="w-full max-w-md bg-industrial-card border border-industrial-border p-8 rounded-2xl shadow-2xl"
           >
-            <div className="flex flex-col items-center justify-center gap-3 mb-8">
+            <div className="flex flex-col items-center justify-center gap-3 mb-6">
               <img 
                 src="https://apivishvaspower.com/logo.png" 
                 alt="Vishvas Power Logo" 
@@ -6797,32 +6857,120 @@ ${PDF_PRINT_STYLES}
                 referrerPolicy="no-referrer"
               />
             </div>
+
+            <div className="grid grid-cols-2 gap-2 mb-6 p-1 bg-industrial-bg rounded-xl border border-industrial-border">
+              <button
+                type="button"
+                onClick={() => { setAuthMode('login'); setAuthError(''); }}
+                className={`py-2 rounded-lg text-xs font-bold uppercase tracking-wider transition-all ${
+                  authMode === 'login'
+                    ? 'bg-industrial-accent text-white shadow-sm'
+                    : 'text-industrial-text-muted hover:text-industrial-text'
+                }`}
+              >
+                Login
+              </button>
+              <button
+                type="button"
+                onClick={() => { setAuthMode('register'); setAuthError(''); }}
+                className={`py-2 rounded-lg text-xs font-bold uppercase tracking-wider transition-all ${
+                  authMode === 'register'
+                    ? 'bg-industrial-accent text-white shadow-sm'
+                    : 'text-industrial-text-muted hover:text-industrial-text'
+                }`}
+              >
+                Register
+              </button>
+            </div>
+
+            <div className="mb-5">
+              <label className="block text-xs font-mono uppercase text-industrial-text-muted mb-2 ml-1">
+                Login As
+              </label>
+              <div className="grid grid-cols-3 gap-2">
+                {AUTH_ROLES.map(role => (
+                  <button
+                    key={role}
+                    type="button"
+                    onClick={() => setAuthRole(role)}
+                    className={`py-2.5 rounded-lg text-[10px] font-bold uppercase tracking-wide border transition-all ${
+                      authRole === role
+                        ? 'bg-industrial-accent/10 border-industrial-accent text-industrial-accent'
+                        : 'bg-industrial-bg border-industrial-border text-industrial-text-muted hover:border-industrial-accent/40'
+                    }`}
+                  >
+                    {role}
+                  </button>
+                ))}
+              </div>
+            </div>
             
             <div className="space-y-4">
+              {authMode === 'register' && (
+                <div>
+                  <label className="block text-xs font-mono uppercase text-industrial-text-muted mb-1.5 ml-1">Full Name</label>
+                  <input 
+                    type="text" 
+                    id="auth-name"
+                    value={authName}
+                    onChange={(e) => setAuthName(e.target.value)}
+                    placeholder="Enter full name"
+                    className="w-full bg-industrial-bg border border-industrial-border rounded-lg px-4 py-3 focus:outline-none focus:border-industrial-accent transition-colors font-mono text-sm"
+                  />
+                </div>
+              )}
               <div>
-                <label className="block text-xs font-mono uppercase text-industrial-text-muted mb-1.5 ml-1">Terminal ID</label>
+                <label className="block text-xs font-mono uppercase text-industrial-text-muted mb-1.5 ml-1">Username</label>
                 <input 
                   type="text" 
-                  id="terminal-id"
-                  defaultValue="ADMIN_TESTING_01"
+                  id="auth-username"
+                  value={authUsername}
+                  onChange={(e) => setAuthUsername(e.target.value)}
+                  placeholder="Enter username"
                   className="w-full bg-industrial-bg border border-industrial-border rounded-lg px-4 py-3 focus:outline-none focus:border-industrial-accent transition-colors font-mono text-sm"
                 />
               </div>
               <div>
-                <label className="block text-xs font-mono uppercase text-industrial-text-muted mb-1.5 ml-1">Access Protocol</label>
+                <label className="block text-xs font-mono uppercase text-industrial-text-muted mb-1.5 ml-1">Password</label>
                 <input 
                   type="password" 
-                  id="password"
-                  defaultValue="••••••••"
+                  id="auth-password"
+                  value={authPassword}
+                  onChange={(e) => setAuthPassword(e.target.value)}
+                  placeholder="Enter password"
                   className="w-full bg-industrial-bg border border-industrial-border rounded-lg px-4 py-3 focus:outline-none focus:border-industrial-accent transition-colors font-mono text-sm"
                 />
               </div>
+              {authMode === 'register' && (
+                <div>
+                  <label className="block text-xs font-mono uppercase text-industrial-text-muted mb-1.5 ml-1">Confirm Password</label>
+                  <input 
+                    type="password" 
+                    id="auth-confirm-password"
+                    value={authConfirmPassword}
+                    onChange={(e) => setAuthConfirmPassword(e.target.value)}
+                    placeholder="Re-enter password"
+                    className="w-full bg-industrial-bg border border-industrial-border rounded-lg px-4 py-3 focus:outline-none focus:border-industrial-accent transition-colors font-mono text-sm"
+                  />
+                </div>
+              )}
+
+              {authError && (
+                <p className="text-xs font-bold text-red-600 bg-red-50 border border-red-100 rounded-lg px-3 py-2">
+                  {authError}
+                </p>
+              )}
+
               <button 
                 id="login-btn"
-                onClick={handleLogin}
+                onClick={authMode === 'login' ? handleLogin : handleRegister}
                 className="w-full bg-industrial-accent hover:bg-blue-700 text-white font-medium py-3 rounded-lg flex items-center justify-center gap-2 transition-all mt-4 shadow-sm"
               >
-                Initialize System <ArrowRight size={18} />
+                {authMode === 'login' ? (
+                  <>Login as {authRole} <ArrowRight size={18} /></>
+                ) : (
+                  <>Register {authRole} <ArrowRight size={18} /></>
+                )}
               </button>
             </div>
             <p className="mt-8 text-center text-sm text-industrial-text-muted">
@@ -7542,13 +7690,7 @@ ${PDF_PRINT_STYLES}
                           </p>
                         </div>
                         <button
-                          onClick={() => {
-                            selectedJob.tests.forEach(t => {
-                              if (t.accepted === false) {
-                                handleAcceptTestOffer(selectedJob.id, t.id);
-                              }
-                            });
-                          }}
+                          onClick={() => handleAcceptAllOffers(selectedJob.id)}
                           className="px-4 py-2 bg-amber-500 hover:bg-amber-600 text-white font-bold text-xs uppercase tracking-wider rounded-lg transition-all flex items-center gap-2 shadow-md shadow-amber-500/20 whitespace-nowrap self-start"
                         >
                           <CheckCircle2 size={14} /> Accept All Offers

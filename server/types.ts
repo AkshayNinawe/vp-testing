@@ -1,16 +1,23 @@
 export type TransformerCapacity = '8MVA' | '12.3MVA' | '16.5MVA';
 export type TransformerType = 'Auto' | 'Traction' | 'V Connect';
-
 export type TestStage = 'Not Started' | 'Tested' | 'Reviewed' | 'Authorized';
 export type JobStatus = 'Processing' | 'Completed';
-export type UserRole = 'Viewer' | 'Admin_Tested' | 'Admin_Reviewed' | 'Admin_Authorized';
 export type AuthRole = 'Tester' | 'Reviewer' | 'Authorizer';
+export type UserRole = 'Admin_Tested' | 'Admin_Reviewed' | 'Admin_Authorized';
 
 export interface AuthUser {
   id: string;
   name: string;
   username: string;
-  password?: string;
+  passwordHash: string;
+  role: AuthRole;
+  createdAt: number;
+}
+
+export interface PublicUser {
+  id: string;
+  name: string;
+  username: string;
   role: AuthRole;
   createdAt: number;
 }
@@ -35,12 +42,7 @@ export interface Job {
   ratingData?: Record<string, string>;
 }
 
-export type AppView =
-  | 'LOGIN'
-  | 'DASHBOARD'
-  | 'SELECT_CAPACITY'
-  | 'SELECT_TYPE'
-  | 'NAME_JOB'
-  | 'JOB_LIST'
-  | 'JOB_DETAIL'
-  | 'TEST_REPORT';
+export interface DatabaseShape {
+  users: AuthUser[];
+  jobs: Job[];
+}
