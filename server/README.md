@@ -22,7 +22,10 @@ Frontend: `http://localhost:3000` → proxies `/api` to backend.
 ## Endpoints
 
 ### Auth
+- `GET /api/auth/registration-status` → `{ canBootstrapAuthorizer }`
 - `POST /api/auth/register` `{ name, username, password, role }`
+  - First account (no Authorizer yet): role must be `Authorizer`
+  - After that: Bearer token of an Authorizer required; role must be `Tester` or `Reviewer`
 - `POST /api/auth/login` `{ username, password, role }` → `{ token, user, userRole }`
 - `GET /api/auth/me` (Bearer token)
 - `POST /api/auth/logout`
@@ -33,13 +36,30 @@ Roles: `Tester` | `Reviewer` | `Authorizer`
 - `GET /api/jobs`
 - `GET /api/jobs/:jobId`
 - `POST /api/jobs` `{ name, capacity, type }`
+  - Job name is normalized to `V/M/{number}` (bare `V/M/` rejected)
+  - Rating Sr. No is set from the job name digits
+- `DELETE /api/jobs/:jobId` (Authorizer only)
 - `PATCH /api/jobs/:jobId/rating` `{ ratingData }`
 
 ### Tests
 - `PATCH /api/jobs/:jobId/tests/:testId/observation` `{ observationData }`
+  - Tester cannot change Reviewer / Authorizer sign-off fields
+  - Reviewer cannot change Technician / Authorizer sign-off fields
 - `PATCH /api/jobs/:jobId/tests/:testId/stage` `{ stage, action: 'promote'|'reject' }`
+  - Promote `Tested` → `Reviewed` requires Technician selected
+  - Promote `Reviewed` → `Authorized` requires Reviewer selected
+  - Sign-off keys: default `tested_by` / `reviewed_by` / `authorized_by`;
+    POST-CONNECTION uses `pct_*`; POST-TANKING uses `pt_*`;
+    FINAL LV uses `offered_by` (technician) and `tested_by` (reviewer)
+  - Reject clears matching `pct_*` / `pt_*` / `offered_*` sign-off fields
 - `PATCH /api/jobs/:jobId/tests/:testId/accept`
+- `PATCH /api/jobs/:jobId/tests/:testId/unaccept` (take back accepted offer if still Not Started)
 - `POST /api/jobs/:jobId/tests/accept-all`
+
+### Sign-off name lists (UI + server constants in `signOff.ts`)
+- Technicians: NITIN PATIL, PANKAJ KAWALE, AKASH PANCHESWAR, CHANCHALESH RABALE, ROHIT SONEWANE, RIPEKSHIT TUMBALE, ABHIJIT KHARKATE, HEMANT BHAGAT
+- Reviewers: GAURAV KUREKAR, KAPIL GAUTAM, HEMANT BHAGAT, PANKAJ KAWALE
+- Authorizers: KIRAN JOHARAPURKAR, SHREYAS BHAVE, VIKAS CHAUHAN
 
 ## Storage
 

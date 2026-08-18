@@ -4,9 +4,11 @@ import cors from 'cors';
 import { randomUUID } from 'crypto';
 import {
   connectDb,
+  countUsersByRole,
   findJobById,
   findUserById,
   findUserByUsername,
+  deleteJobById,
   insertJob,
   insertUser,
   listJobs,
@@ -19,9 +21,19 @@ import {
   signToken,
   toPublicUser,
   verifyPassword,
+  verifyToken,
   type AuthedRequest,
 } from './auth';
 import { createJob, recomputeJobStatus } from './jobFactory';
+import {
+  applyRoleSignOffLocks,
+  clearSignOffOnReject,
+  getReviewerFieldKey,
+  getSelectedValue,
+  getTechnicianFieldKey,
+  normalizeJobName,
+  stampPrefixedSignOffDates,
+} from './signOff';
 import type {
   AuthRole,
   Job,
@@ -86,7 +98,20 @@ api.get('/health', async (_req, res) => {
   res.json({ ok: true, service: 'volttrack-api', db: 'mongodb' });
 });
 
-api.post('/auth/register', async (req, res) => {
+api.get('/auth/registration-status', async (_req, res) => {
+  try {
+    const authorizerCount = await countUsersByRole('Authorizer');
+    return res.json({
+      canBootstrapAuthorizer: authorizerCount === 0,
+      staffRegistrationRequiresAuthorizer: true,
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: 'Failed to load registration status' });
+  }
+});
+
+api.post('/auth/register', async (req: AuthedRequest, res) => {
   try {
     const name = String(req.body?.name || '').trim();
     const username = String(req.body?.username || '').trim().toLowerCase();
@@ -102,6 +127,42 @@ api.post('/auth/register', async (req, res) => {
     if (!AUTH_ROLES.includes(role)) {
       return res.status(400).json({ error: 'Role must be Tester, Reviewer, or Authorizer' });
     }
+
+    const header = req.headers.authorization || '';
+    const token = header.startsWith('Bearer ') ? header.slice(7) : '';
+    let actorRole: AuthRole | null = null;
+    if (token) {
+      try {
+        const payload = verifyToken(token);
+        actorRole = payload.role;
+        req.auth = payload;
+        req.userRole = authRoleToUserRole(actorRole);
+      } catch {
+        return res.status(401).json({ error: 'Invalid or expired token' });
+      }
+    }
+
+    const authorizerCount = await countUsersByRole('Authorizer');
+    const isBootstrap = authorizerCount === 0;
+
+    if (isBootstrap) {
+      if (role !== 'Authorizer') {
+        return res.status(403).json({
+          error: 'First account must be an Authorizer. Testers and Reviewers are created by an Authorizer.',
+        });
+      }
+    } else if (actorRole === 'Authorizer') {
+      if (role !== 'Tester' && role !== 'Reviewer') {
+        return res.status(403).json({
+          error: 'Authorizers can only register Tester or Reviewer accounts',
+        });
+      }
+    } else {
+      return res.status(403).json({
+        error: 'Only an Authorizer can register Tester and Reviewer accounts',
+      });
+    }
+
     if (await findUserByUsername(username)) {
       return res.status(409).json({ error: 'Username already exists' });
     }
@@ -196,11 +257,11 @@ api.get('/jobs/:jobId', requireAuth, async (req, res) => {
 
 api.post('/jobs', requireAuth, async (req, res) => {
   try {
-    const name = String(req.body?.name || '').trim();
+    const name = normalizeJobName(String(req.body?.name || ''));
     const capacity = req.body?.capacity as TransformerCapacity;
     const type = req.body?.type as TransformerType;
 
-    if (!name) return res.status(400).json({ error: 'Job name is required' });
+    if (!name || name === 'V/M/') return res.status(400).json({ error: 'Job name is required' });
     if (!CAPACITIES.includes(capacity)) return res.status(400).json({ error: 'Invalid capacity' });
     if (!TYPES.includes(type)) return res.status(400).json({ error: 'Invalid type' });
 
@@ -210,6 +271,21 @@ api.post('/jobs', requireAuth, async (req, res) => {
   } catch (err) {
     console.error(err);
     return res.status(500).json({ error: 'Failed to create job' });
+  }
+});
+
+api.delete('/jobs/:jobId', requireAuth, async (req: AuthedRequest, res) => {
+  try {
+    if (req.userRole !== 'Admin_Authorized') {
+      return res.status(403).json({ error: 'Only Authorizers can delete jobs' });
+    }
+
+    const deleted = await deleteJobById(req.params.jobId);
+    if (!deleted) return res.status(404).json({ error: 'Job not found' });
+    return res.status(204).send();
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: 'Failed to delete job' });
   }
 });
 
@@ -258,7 +334,12 @@ api.patch('/jobs/:jobId/tests/:testId/observation', requireAuth, async (req: Aut
 
         updatedTest = {
           ...test,
-          observationData: { ...(observationData as Record<string, string>) },
+          observationData: applyRoleSignOffLocks(
+            test.name,
+            role,
+            test.observationData || {},
+            observationData as Record<string, string>
+          ),
           updatedAt: Date.now(),
         };
         return updatedTest;
@@ -307,40 +388,53 @@ api.patch('/jobs/:jobId/tests/:testId/stage', requireAuth, async (req: AuthedReq
             return test;
           }
 
+          if (targetStage === 'Reviewed' && !getSelectedValue(test.observationData, getTechnicianFieldKey(test.name))) {
+            error = 'Select Technician is mandatory before submitting to Reviewer.';
+            return test;
+          }
+          if (targetStage === 'Authorized' && !getSelectedValue(test.observationData, getReviewerFieldKey(test.name))) {
+            error = 'Select Reviewer is mandatory before submitting to Authorizer.';
+            return test;
+          }
+
           let observationData = { ...(test.observationData || {}) };
           const nowString = new Date().toLocaleString();
+          const testNameUpper = test.name.toUpperCase();
+          const isFinalLv = testNameUpper === 'FINAL LV TEST REPORT';
 
-          if (test.name.toUpperCase() === 'POST-CONNECTION TEST') {
-            if (observationData.pct_tested_by && !observationData.pct_tested_date) {
-              observationData.pct_tested_date = nowString;
-            }
-            if (targetStage === 'Reviewed' || targetStage === 'Authorized') {
-              if (observationData.pct_reviewed_by && !observationData.pct_reviewed_date) {
-                observationData.pct_reviewed_date = nowString;
-              }
-            }
-            if (targetStage === 'Authorized') {
-              if (observationData.pct_authorized_by && !observationData.pct_authorized_date) {
-                observationData.pct_authorized_date = nowString;
-              }
-            }
-          }
+          stampPrefixedSignOffDates(test.name, observationData, targetStage, nowString);
 
           if (isReportable(test.name)) {
             if (targetStage === 'Tested') {
-              observationData = {
-                ...observationData,
-                tested_at: nowString,
-                tested_by: observationData.tested_by || '',
-              };
+              if (isFinalLv) {
+                observationData = {
+                  ...observationData,
+                  offered_at: observationData.offered_at || nowString,
+                  offered_by: observationData.offered_by || '',
+                };
+              } else {
+                observationData = {
+                  ...observationData,
+                  tested_at: nowString,
+                  tested_by: observationData.tested_by || '',
+                };
+              }
               openedTestId = test.id;
             }
             if (targetStage === 'Reviewed') {
-              observationData = {
-                ...observationData,
-                reviewed_at: nowString,
-                reviewed_by: observationData.reviewed_by || '',
-              };
+              if (isFinalLv) {
+                observationData = {
+                  ...observationData,
+                  tested_at: nowString,
+                  tested_by: observationData.tested_by || '',
+                };
+              } else {
+                observationData = {
+                  ...observationData,
+                  reviewed_at: nowString,
+                  reviewed_by: observationData.reviewed_by || '',
+                };
+              }
             }
             if (targetStage === 'Authorized') {
               observationData = {
@@ -376,19 +470,8 @@ api.patch('/jobs/:jobId/tests/:testId/stage', requireAuth, async (req: AuthedReq
         }
 
         const observationData = { ...(test.observationData || {}) };
-        if (targetStage === 'Tested') {
-          delete observationData.reviewed_at;
-          delete observationData.reviewed_by;
-        } else if (targetStage === 'Reviewed') {
-          delete observationData.authorized_at;
-          delete observationData.authorized_by;
-        } else if (targetStage === 'Not Started') {
-          delete observationData.tested_at;
-          delete observationData.tested_by;
-          delete observationData.reviewed_at;
-          delete observationData.reviewed_by;
-          delete observationData.authorized_at;
-          delete observationData.authorized_by;
+        if (targetStage === 'Tested' || targetStage === 'Reviewed' || targetStage === 'Not Started') {
+          clearSignOffOnReject(observationData, targetStage);
         }
 
         return {
@@ -438,6 +521,42 @@ api.patch('/jobs/:jobId/tests/:testId/accept', requireAuth, async (req: AuthedRe
   } catch (err) {
     console.error(err);
     return res.status(500).json({ error: 'Failed to accept test' });
+  }
+});
+
+api.patch('/jobs/:jobId/tests/:testId/unaccept', requireAuth, async (req: AuthedRequest, res) => {
+  try {
+    if (req.userRole === 'Admin_Tested') {
+      return res.status(403).json({ error: 'Testers cannot take back test offers' });
+    }
+
+    let updatedTest: TransformerTest | null = null;
+    let deniedReason: string | null = null;
+
+    const updatedJob = await updateJobById(req.params.jobId, job => {
+      const tests = job.tests.map(test => {
+        if (test.id !== req.params.testId) return test;
+        if (test.accepted === false) {
+          deniedReason = 'Offer is not currently accepted';
+          return test;
+        }
+        if (test.stage !== 'Not Started') {
+          deniedReason = 'Cannot take back offer after testing has started';
+          return test;
+        }
+        updatedTest = { ...test, accepted: false, updatedAt: Date.now() };
+        return updatedTest;
+      });
+      if (!updatedTest) return null;
+      return { ...job, tests };
+    });
+
+    if (deniedReason) return res.status(403).json({ error: deniedReason });
+    if (!updatedJob || !updatedTest) return res.status(404).json({ error: 'Job or test not found' });
+    return res.json({ job: updatedJob, test: updatedTest });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: 'Failed to take back test offer' });
   }
 });
 

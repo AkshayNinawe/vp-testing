@@ -42,6 +42,13 @@ export const api = {
     else localStorage.removeItem(TOKEN_KEY);
   },
 
+  registrationStatus() {
+    return request<{
+      canBootstrapAuthorizer: boolean;
+      staffRegistrationRequiresAuthorizer: boolean;
+    }>('/auth/registration-status');
+  },
+
   register(body: { name: string; username: string; password: string; role: AuthRole }) {
     return request<{ user: PublicAuthUser }>('/auth/register', {
       method: 'POST',
@@ -72,6 +79,12 @@ export const api = {
     return request<{ job: Job }>('/jobs', {
       method: 'POST',
       body: JSON.stringify(body),
+    });
+  },
+
+  deleteJob(jobId: string) {
+    return request<void>(`/jobs/${jobId}`, {
+      method: 'DELETE',
     });
   },
 
@@ -108,6 +121,13 @@ export const api = {
 
   acceptTest(jobId: string, testId: string) {
     return request<{ job: Job }>(`/jobs/${jobId}/tests/${testId}/accept`, {
+      method: 'PATCH',
+      body: JSON.stringify({}),
+    });
+  },
+
+  unacceptTest(jobId: string, testId: string) {
+    return request<{ job: Job }>(`/jobs/${jobId}/tests/${testId}/unaccept`, {
       method: 'PATCH',
       body: JSON.stringify({}),
     });

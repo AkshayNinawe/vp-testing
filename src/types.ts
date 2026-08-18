@@ -38,6 +38,7 @@ export interface Job {
 export type AppView =
   | 'LOGIN'
   | 'DASHBOARD'
+  | 'REGISTER_STAFF'
   | 'SELECT_CAPACITY'
   | 'SELECT_TYPE'
   | 'NAME_JOB'

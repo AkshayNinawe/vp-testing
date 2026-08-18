@@ -1,4 +1,5 @@
 import { randomUUID } from 'crypto';
+import { getAuthorizerFieldKey, getSelectedValue } from './signOff';
 import type {
   Job,
   TransformerCapacity,
@@ -110,7 +111,6 @@ export function createJob(input: {
   const jobNumber = matches && matches.length > 0 ? matches[matches.length - 1] : '';
   const autoSrNo = jobNumber ? `V/M/${jobNumber}` : '';
   const ratingDefaults = getJobRatingDefaults(input.type, input.capacity);
-  const shouldUseFixedAuto165SrNo = input.type === 'Auto' && input.capacity === '16.5MVA';
 
   return {
     id: randomUUID(),
@@ -122,13 +122,15 @@ export function createJob(input: {
     tests,
     ratingData: {
       ...ratingDefaults,
-      rating_sr_no: shouldUseFixedAuto165SrNo
-        ? (ratingDefaults.rating_sr_no || '')
-        : (autoSrNo || ratingDefaults.rating_sr_no || ''),
+      rating_sr_no: autoSrNo || input.name.trim() || ratingDefaults.rating_sr_no || '',
     },
   };
 }
 
 export function recomputeJobStatus(tests: TransformerTest[]) {
-  return tests.every(t => t.stage === 'Authorized') ? 'Completed' : 'Processing';
+  const hasAuthorizerSignOff = (test: TransformerTest) =>
+    getSelectedValue(test.observationData, getAuthorizerFieldKey(test.name)).length > 0;
+  return tests.every(t => t.stage === 'Authorized' && hasAuthorizerSignOff(t))
+    ? 'Completed'
+    : 'Processing';
 }

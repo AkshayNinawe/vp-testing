@@ -277,7 +277,7 @@ export function getTestFormHtml(
                   <td class="p-2 bg-slate-100 font-bold text-center" style="width: 35%;">Details of Insulation Tester</td>
                 </tr>
                 <tr class="border-b border-[#cbd5e1]">
-                  <td class="p-2 bg-slate-50 border-r border-[#cbd5e1] font-bold text-center">Ambiant Temp (&deg;C):</td>
+                  <td class="p-2 bg-slate-50 border-r border-[#cbd5e1] font-bold text-center">Ambient Temp (&deg;C):</td>
                   <td class="p-1 border-r border-[#cbd5e1] bg-white text-center">${f('ir_amb_temp', '', '', 'text-center', '')}</td>
                   <td class="p-2 bg-slate-50 border-r border-[#cbd5e1] font-bold text-center" colspan="2">Make:</td>
                   <td class="p-1 bg-white text-center">${f('ir_tester_make', '', '', 'text-center', 'MEGGER')}</td>
@@ -527,8 +527,7 @@ export function getTestFormHtml(
                 <tr class="border-b border-[#cbd5e1]">
                   <th class="p-3 border-r border-[#cbd5e1] text-left">TEMINALS</th>
                   <th class="p-3 border-r border-[#cbd5e1] text-center">
-                    <div>Resistance @ Amb.</div>
-                    <div class="text-[10px] font-bold text-[#64748b] mt-1">Ω</div>
+                    <div>Measured Resistance (Ω)</div>
                   </th>
                   <th class="p-3 border-r border-[#cbd5e1] text-center bg-orange-50 text-orange-800">
                     <div>Resistance @75°C</div>
@@ -919,8 +918,7 @@ export function getTestFormHtml(
                 <tr class="border-b border-[#cbd5e1]">
                   <th class="p-4 border-r border-[#cbd5e1] text-left">TEMINALS</th>
                   <th class="p-4 border-r border-[#cbd5e1] text-center font-bold">
-                    <div>RESISTANCE @ AMB.</div>
-                    <div class="text-[10px] font-bold text-slate-500 mt-1">Ω</div>
+                    <div>Measured Resistance (Ω)</div>
                   </th>
                   <th class="p-4 border-r border-[#cbd5e1] text-center bg-orange-50 text-orange-800 font-bold">
                     <div>RESISTANCE @75°C</div>
@@ -1550,8 +1548,7 @@ export function getTestFormHtml(
                 <tr class="border-b border-[#cbd5e1]">
                   <th class="p-3 border-r border-[#cbd5e1] text-left font-black">TEMINALS</th>
                   <th class="p-3 border-r border-[#cbd5e1] text-center font-black">
-                    <div>RESISTANCE @ AMB.</div>
-                    <div class="text-[10px] font-normal text-slate-400">Ω</div>
+                    <div>Measured Resistance (Ω)</div>
                   </th>
                   <th class="p-3 border-r border-[#cbd5e1] text-center bg-orange-50/60 text-orange-800 font-black">
                     <div>RESISTANCE @75°C</div>
@@ -2753,8 +2750,7 @@ export function getTestFormHtml(
                 <tr class="border-b border-[#cbd5e1]">
                   <th class="p-3 border-r border-[#cbd5e1] text-left font-black">TEMINALS</th>
                   <th class="p-3 border-r border-[#cbd5e1] text-center font-black">
-                    <div>RESISTANCE @ AMB.</div>
-                    <div class="text-[10px] font-normal text-slate-400">Ω</div>
+                    <div>Measured Resistance (Ω)</div>
                   </th>
                   <th class="p-3 border-r border-[#cbd5e1] text-center bg-orange-50/60 text-orange-800 font-black">
                     <div>RESISTANCE @75°C</div>
@@ -2999,7 +2995,7 @@ export function getTestFormHtml(
                   <td class="p-2 bg-slate-100 font-bold text-center" style="width: 35%;">Details of Insulation Tester</td>
                 </tr>
                 <tr class="border-b border-[#cbd5e1]">
-                  <td class="p-2 bg-slate-50 border-r border-[#cbd5e1] font-bold text-center">Ambiant Temp (&deg;C):</td>
+                  <td class="p-2 bg-slate-50 border-r border-[#cbd5e1] font-bold text-center">Ambient Temp (&deg;C):</td>
                   <td class="p-1 border-r border-[#cbd5e1] bg-white text-center">${f('lv_pi_amb_temp', '', '', 'text-center', '')}</td>
                   <td class="p-2 bg-slate-50 border-r border-[#cbd5e1] font-bold text-center" colspan="2">Make:</td>
                   <td class="p-1 bg-white text-center">${f('lv_pi_make', '', '', 'text-center', 'MEGGER')}</td>

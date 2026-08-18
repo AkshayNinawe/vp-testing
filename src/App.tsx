@@ -27,11 +27,14 @@ import {
   Lock,
   Save,
   FileDown,
-  Check
+  Check,
+  UserPlus,
+  Bell,
+  Search,
+  Trash2
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { AppView, Job, TransformerCapacity, TransformerType, TransformerTest, TestStage, JobStatus, UserRole, AuthRole, AuthUser } from './types';
-import { getTestFormHtml } from './reportTemplates';
 import { getCTConfig, getRatioAppliedPrimary, seedCTNameplateDefaults } from './ctTestConfig';
 import { getPreConnWindingResMaxGuaranteed, seedPreConnWindingResGuaranteed } from './preConnectionTestConfig';
 import { calculatePostConnScImpedanceZ, getPostConnWindingResMaxGuaranteed, seedPostConnWindingResGuaranteed } from './postConnectionTestConfig';
@@ -39,8 +42,33 @@ import { calculatePostTankingScImpedanceZ, getPostTankingWindingResMaxGuaranteed
 import { calculateFinalLvScImpedanceZ, getFinalLvWindingResMaxGuaranteed, seedFinalLvWindingResGuaranteed } from './finalLvTestConfig';
 import { applyHVLLCalculations, getHVLLConfig, getHVNllGuaranteedCurrent, getHVNllGuaranteedPower, seedHVTestListDefaults } from './hvTestListConfig';
 import { api } from './api';
+import {
+  acceptAllLocalTests,
+  acceptLocalTest,
+  authRoleToUserRole,
+  createLocalJob,
+  deleteLocalJob,
+  isNetworkError,
+  isOfflineMode,
+  listNotificationsForRole,
+  loadLocalJobs,
+  loginLocalUser,
+  markAllNotificationsRead,
+  markNotificationRead,
+  pushNotification,
+  registerLocalUser,
+  saveLocalJobs,
+  setOfflineMode,
+  unacceptLocalTest,
+  unreadNotificationCount,
+  updateLocalObservation,
+  updateLocalRating,
+  updateLocalStage,
+  type AppNotification,
+} from './localStore';
 
 const AUTH_ROLES: AuthRole[] = ['Tester', 'Reviewer', 'Authorizer'];
+const STAFF_ROLES: AuthRole[] = ['Tester', 'Reviewer'];
 
 const userRoleToAuthRole = (role: UserRole): AuthRole => {
   if (role === 'Admin_Reviewed') return 'Reviewer';
@@ -202,9 +230,13 @@ const getJobRatingNameplateFields = (job: Job) => {
   const isAutoNameplate =
     job.type === 'Auto' &&
     (job.capacity === '8MVA' || job.capacity === '12.3MVA' || job.capacity === '16.5MVA');
+  const srNo =
+    job.type === 'Auto' && job.capacity === '16.5MVA'
+      ? (job.name.trim() || rating.rating_sr_no)
+      : rating.rating_sr_no;
 
   return [
-    { label: '1. Sr. No', value: rating.rating_sr_no },
+    { label: '1. Sr. No', value: srNo },
     {
       label: isAutoNameplate ? '2. Manufacturing Year' : '2. Commissioning year',
       value: rating.rating_comm_year,
@@ -241,30 +273,6 @@ const getJobRatingNameplateFields = (job: Job) => {
   ];
 };
 
-const renderJobRatingNameplateRows = (job: Job) => {
-  const fields = getJobRatingNameplateFields(job);
-  let rows = '';
-
-  for (let index = 0; index < fields.length; index += 2) {
-    const left = fields[index];
-    const right = fields[index + 1];
-    rows += `
-      <tr>
-        <td style="font-weight: 600; color: #475569; width: 25%;">${left.label}</td>
-        <td style="font-weight: 700; color: #0f172a; width: 25%;">${left.value || '-'}</td>
-        ${
-          right
-            ? `<td style="font-weight: 600; color: #475569; width: 25%;">${right.label}</td>
-               <td style="font-weight: 700; color: #0f172a; width: 25%;">${right.value || '-'}</td>`
-            : '<td colspan="2"></td>'
-        }
-      </tr>
-    `;
-  }
-
-  return rows;
-};
-
 const CT_SECTIONS = ['1.1', '2', '2.1', 'WTI'] as const;
 type CTSection = typeof CT_SECTIONS[number];
 
@@ -286,17 +294,273 @@ const KNEE_ROWS = [
 ];
 
 const NAMES_TECHNICIANS = [
-  'NITIN PATIL', 'PANKAJ KAWLE', 'AKASH PANCHESWAR', 'CHANCHALESH RABLE', 
+  'NITIN PATIL', 'PANKAJ KAWALE', 'AKASH PANCHESWAR', 'CHANCHALESH RABALE', 
   'ROHIT SONEWANE', 'RIPEKSHIT TUMBALE', 'ABHIJIT KHARKATE', 'HEMANT BHAGAT'
 ];
 
 const NAMES_REVIEWERS = [
-  'SOMYA DAS', 'GAURAV KUREKAR', 'KAPIL GAUTAM', 'HEMANT BHAGAT', 'PANKAJ KAWLE'
+  'GAURAV KUREKAR', 'KAPIL GAUTAM', 'HEMANT BHAGAT', 'PANKAJ KAWALE'
 ];
 
 const NAMES_AUTHORIZERS = [
-  'KIRAN JOHARAPURKAR', 'SHREYASH BHAVE', 'VIKAS CHAUHAN'
+  'KIRAN JOHARAPURKAR', 'SHREYAS BHAVE', 'VIKAS CHAUHAN'
 ];
+
+/** Stamp date/time when a sign-off person is selected (or clear when deselected). */
+const stampSignOffDate = (
+  updated: Record<string, string>,
+  key: string,
+  value: string,
+  map: Record<string, string>
+) => {
+  const dateKey = map[key];
+  if (!dateKey) return;
+  const stamp = value ? new Date().toLocaleString() : '';
+  updated[dateKey] = stamp;
+  // Keep legacy _at / _date pairs in sync for older saved reports
+  if (dateKey.endsWith('_at')) {
+    updated[dateKey.replace(/_at$/, '_date')] = stamp;
+  } else if (dateKey.endsWith('_date')) {
+    updated[dateKey.replace(/_date$/, '_at')] = stamp;
+  }
+};
+
+const SIGN_OFF_AT_MAP: Record<string, string> = {
+  tested_by: 'tested_at',
+  reviewed_by: 'reviewed_at',
+  authorized_by: 'authorized_at',
+  offered_by: 'offered_at',
+};
+
+const PCT_SIGN_OFF_DATE_MAP: Record<string, string> = {
+  pct_tested_by: 'pct_tested_date',
+  pct_reviewed_by: 'pct_reviewed_date',
+  pct_authorized_by: 'pct_authorized_date',
+};
+
+const PT_SIGN_OFF_DATE_MAP: Record<string, string> = {
+  pt_tested_by: 'pt_tested_date',
+  pt_reviewed_by: 'pt_reviewed_date',
+  pt_authorized_by: 'pt_authorized_date',
+};
+
+type SignOffRoleConfig = {
+  byKey: string;
+  dateKey: string;
+  placeholder: string;
+  label: string;
+  names: string[];
+  lockForTester?: boolean;
+  lockForReviewer?: boolean;
+};
+
+const DEFAULT_SIGN_OFF_ROLES: SignOffRoleConfig[] = [
+  {
+    byKey: 'tested_by',
+    dateKey: 'tested_at',
+    placeholder: 'Select Technician *',
+    label: 'TESTED BY (TESTED)',
+    names: NAMES_TECHNICIANS,
+    lockForReviewer: true,
+  },
+  {
+    byKey: 'reviewed_by',
+    dateKey: 'reviewed_at',
+    placeholder: 'Select Reviewer *',
+    label: 'REVIEWED BY (REVIEWED)',
+    names: NAMES_REVIEWERS,
+    lockForTester: true,
+  },
+  {
+    byKey: 'authorized_by',
+    dateKey: 'authorized_at',
+    placeholder: 'Select Authorizer',
+    label: 'AUTHORIZED BY (AUTHORIZED)',
+    names: NAMES_AUTHORIZERS,
+    lockForTester: true,
+    lockForReviewer: true,
+  },
+];
+
+const PCT_SIGN_OFF_ROLES: SignOffRoleConfig[] = [
+  {
+    byKey: 'pct_tested_by',
+    dateKey: 'pct_tested_date',
+    placeholder: 'Select Technician *',
+    label: 'TESTED BY (TESTED)',
+    names: NAMES_TECHNICIANS,
+    lockForReviewer: true,
+  },
+  {
+    byKey: 'pct_reviewed_by',
+    dateKey: 'pct_reviewed_date',
+    placeholder: 'Select Reviewer *',
+    label: 'REVIEWED BY (REVIEWED)',
+    names: NAMES_REVIEWERS,
+    lockForTester: true,
+  },
+  {
+    byKey: 'pct_authorized_by',
+    dateKey: 'pct_authorized_date',
+    placeholder: 'Select Authorizer',
+    label: 'AUTHORIZED BY (AUTHORIZED)',
+    names: NAMES_AUTHORIZERS,
+    lockForTester: true,
+    lockForReviewer: true,
+  },
+];
+
+const PT_SIGN_OFF_ROLES: SignOffRoleConfig[] = [
+  {
+    byKey: 'pt_tested_by',
+    dateKey: 'pt_tested_date',
+    placeholder: 'Select Technician *',
+    label: 'TESTED BY (TESTED)',
+    names: NAMES_TECHNICIANS,
+    lockForReviewer: true,
+  },
+  {
+    byKey: 'pt_reviewed_by',
+    dateKey: 'pt_reviewed_date',
+    placeholder: 'Select Reviewer *',
+    label: 'REVIEWED BY (REVIEWED)',
+    names: NAMES_REVIEWERS,
+    lockForTester: true,
+  },
+  {
+    byKey: 'pt_authorized_by',
+    dateKey: 'pt_authorized_date',
+    placeholder: 'Select Authorizer',
+    label: 'AUTHORIZED BY (AUTHORIZED)',
+    names: NAMES_AUTHORIZERS,
+    lockForTester: true,
+    lockForReviewer: true,
+  },
+];
+
+const FINAL_LV_SIGN_OFF_ROLES: SignOffRoleConfig[] = [
+  {
+    byKey: 'offered_by',
+    dateKey: 'offered_at',
+    placeholder: 'Select Technician *',
+    label: 'TESTED BY (TESTED)',
+    names: NAMES_TECHNICIANS,
+    lockForReviewer: true,
+  },
+  {
+    byKey: 'tested_by',
+    dateKey: 'tested_at',
+    placeholder: 'Select Reviewer *',
+    label: 'REVIEWED BY (REVIEWED)',
+    names: NAMES_REVIEWERS,
+    lockForTester: true,
+  },
+  {
+    byKey: 'authorized_by',
+    dateKey: 'authorized_at',
+    placeholder: 'Select Authorizer',
+    label: 'AUTHORIZED BY (AUTHORIZED)',
+    names: NAMES_AUTHORIZERS,
+    lockForTester: true,
+    lockForReviewer: true,
+  },
+];
+
+function resolveSignOffDate(data: Record<string, string>, byKey: string, dateKey: string) {
+  if (!String(data[byKey] || '').trim()) return '';
+  const primary = String(data[dateKey] || '').trim();
+  if (primary) return primary;
+  if (dateKey.endsWith('_at')) return String(data[dateKey.replace(/_at$/, '_date')] || '').trim();
+  if (dateKey.endsWith('_date')) return String(data[dateKey.replace(/_date$/, '_at')] || '').trim();
+  return '';
+}
+
+function SignOffSection({
+  data,
+  onChange,
+  currentRole,
+  roles = DEFAULT_SIGN_OFF_ROLES,
+}: {
+  data: Record<string, string>;
+  onChange: (key: string, value: string) => void;
+  currentRole: UserRole;
+  roles?: SignOffRoleConfig[];
+}) {
+  return (
+    <div className="mt-8 pt-8 border-t border-industrial-border grid grid-cols-1 md:grid-cols-3 gap-8">
+      {roles.map(role => {
+        const name = data[role.byKey] || '';
+        const dateText = resolveSignOffDate(data, role.byKey, role.dateKey);
+        const locked =
+          (!!role.lockForTester && currentRole === 'Admin_Tested') ||
+          (!!role.lockForReviewer && currentRole === 'Admin_Reviewed');
+        return (
+          <div key={role.byKey} className="text-center">
+            <div className="border-b border-industrial-border pb-4 mb-2">
+              <select
+                className="w-full text-center bg-transparent font-bold text-industrial-text uppercase outline-none text-xs disabled:opacity-70 disabled:cursor-not-allowed"
+                value={name}
+                onChange={(e) => onChange(role.byKey, e.target.value)}
+                disabled={locked}
+              >
+                <option value="">{role.placeholder}</option>
+                {role.names.map(n => (
+                  <option key={n} value={n}>{n}</option>
+                ))}
+              </select>
+              {dateText ? (
+                <div className="text-[10px] text-industrial-text-muted mt-1 italic">{dateText}</div>
+              ) : null}
+            </div>
+            <p className="text-[10px] font-bold uppercase tracking-widest text-industrial-text-muted">{role.label}</p>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+const getTechnicianFieldKey = (testName: string) => {
+  const n = testName.toUpperCase();
+  if (n === 'POST-CONNECTION TEST') return 'pct_tested_by';
+  if (n === 'POST-TANKING TEST') return 'pt_tested_by';
+  if (n === 'FINAL LV TEST REPORT') return 'offered_by';
+  return 'tested_by';
+};
+
+const getSelectedTechnician = (test: TransformerTest) => {
+  const key = getTechnicianFieldKey(test.name);
+  return String(test.observationData?.[key] || '').trim();
+};
+
+const getReviewerFieldKey = (testName: string) => {
+  const n = testName.toUpperCase();
+  if (n === 'POST-CONNECTION TEST') return 'pct_reviewed_by';
+  if (n === 'POST-TANKING TEST') return 'pt_reviewed_by';
+  if (n === 'FINAL LV TEST REPORT') return 'tested_by';
+  return 'reviewed_by';
+};
+
+const getSelectedReviewer = (test: TransformerTest) => {
+  const key = getReviewerFieldKey(test.name);
+  return String(test.observationData?.[key] || '').trim();
+};
+
+const getAuthorizerFieldKey = (testName: string) => {
+  const n = testName.toUpperCase();
+  if (n === 'POST-CONNECTION TEST') return 'pct_authorized_by';
+  if (n === 'POST-TANKING TEST') return 'pt_authorized_by';
+  return 'authorized_by';
+};
+
+const getSelectedAuthorizer = (test: TransformerTest) => {
+  const key = getAuthorizerFieldKey(test.name);
+  return String(test.observationData?.[key] || '').trim();
+};
+
+/** Completed only after Authorizer selected someone and approved (Authorized). */
+const isTestCompleted = (test: TransformerTest) =>
+  test.stage === 'Authorized' && !!getSelectedAuthorizer(test);
 
 const FormContext = createContext<{
   data: Record<string, string>;
@@ -390,27 +654,39 @@ function JobRatingForm({ job, onUpdate, currentRole = 'Admin_Tested' }: { job: J
   const jobNumber = matches && matches.length > 0 ? matches[matches.length - 1] : '';
   const defaultSrNo = jobNumber ? `V/M/${jobNumber}` : '';
   const ratingDefaults = getJobRatingDefaults(job.type, job.capacity);
+  const isAuto165 = job.type === 'Auto' && job.capacity === '16.5MVA';
+  const jobMatchedSrNo = job.name.trim() || defaultSrNo;
   const shouldMigrateAuto165Rating =
-    job.type === 'Auto' &&
-    job.capacity === '16.5MVA' &&
+    isAuto165 &&
     baseData[RATING_NAMEPLATE_VERSION_KEY] !== AUTO_16_5MVA_RATING_VERSION;
+  const shouldSyncAuto165SrNo =
+    isAuto165 &&
+    String(baseData.rating_sr_no || '').trim() !== jobMatchedSrNo;
   const migratedBaseData = shouldMigrateAuto165Rating
     ? {
         ...baseData,
         ...AUTO_16_5MVA_RATING_DEFAULTS,
+        rating_sr_no: jobMatchedSrNo,
         [RATING_NAMEPLATE_VERSION_KEY]: AUTO_16_5MVA_RATING_VERSION,
       }
-    : baseData;
+    : shouldSyncAuto165SrNo
+      ? {
+          ...baseData,
+          rating_sr_no: jobMatchedSrNo,
+        }
+      : baseData;
   const isAutoNameplate = job.type === 'Auto' && (job.capacity === '8MVA' || job.capacity === '12.3MVA' || job.capacity === '16.5MVA');
   
   const data = {
     ...ratingDefaults,
     ...migratedBaseData,
-    rating_sr_no: migratedBaseData.rating_sr_no || defaultSrNo || ratingDefaults.rating_sr_no || ''
+    rating_sr_no: isAuto165
+      ? jobMatchedSrNo
+      : (migratedBaseData.rating_sr_no || defaultSrNo || ratingDefaults.rating_sr_no || '')
   };
 
   useEffect(() => {
-    if (shouldMigrateAuto165Rating) {
+    if (shouldMigrateAuto165Rating || shouldSyncAuto165SrNo) {
       onUpdate(migratedBaseData);
     }
   }, []);
@@ -437,7 +713,11 @@ function JobRatingForm({ job, onUpdate, currentRole = 'Admin_Tested' }: { job: J
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-x-8 gap-y-6">
-          <Field id="rating_sr_no" pdfValue={ratingDefaults.rating_sr_no || 'V/M/'} label="1. Sr. No" />
+          <Field
+            id="rating_sr_no"
+            pdfValue={isAuto165 ? jobMatchedSrNo : (ratingDefaults.rating_sr_no || 'V/M/')}
+            label="1. Sr. No"
+          />
           <Field id="rating_comm_year" pdfValue={ratingDefaults.rating_comm_year} label={isAutoNameplate ? '2. Manufacturing Year' : '2. Commissioning year'} placeholder="YYYY" />
           <div className="grid grid-cols-2 gap-4">
              <Field id="rating_hv_v" pdfValue={ratingDefaults.rating_hv_v} label={isAutoNameplate ? '3. Voltage rating (kV) - HV' : '3. HV Voltage (kV)'} />
@@ -479,18 +759,7 @@ function CTTestForm({ test, job, onUpdate }: { test: TransformerTest, job?: Job,
 
   const handleFieldChange = (key: string, value: string) => {
     const updated = { ...data, [key]: value };
-    const nowString = new Date().toLocaleString();
-
-    if (key === 'tested_by') {
-      updated['tested_at'] = value ? nowString : '';
-    }
-    if (key === 'reviewed_by') {
-      updated['reviewed_at'] = value ? nowString : '';
-    }
-    if (key === 'authorized_by') {
-      updated['authorized_at'] = value ? nowString : '';
-    }
-
+    stampSignOffDate(updated, key, value, SIGN_OFF_AT_MAP);
     onUpdate(updated);
   };
 
@@ -628,56 +897,7 @@ function CTTestForm({ test, job, onUpdate }: { test: TransformerTest, job?: Job,
           </div>
         </section>
       ))}
-
-      {/* Signature Section Placeholder */}
-      <div className="mt-8 pt-8 border-t border-industrial-border grid grid-cols-1 md:grid-cols-3 gap-8">
-        <div className="text-center">
-          <div className="border-b border-industrial-border pb-4 mb-2">
-            <select 
-              className="w-full text-center bg-transparent font-bold text-industrial-text uppercase outline-none text-xs"
-              value={data.tested_by || ''}
-              onChange={(e) => handleFieldChange('tested_by', e.target.value)}
-            >
-              <option value="">Select Technician</option>
-              {NAMES_TECHNICIANS.map(n => <option key={n} value={n}>{n}</option>)}
-            </select>
-            {data.tested_at && <div className="text-[10px] text-industrial-text-muted mt-1 italic">{data.tested_at}</div>}
-          </div>
-          <p className="text-[10px] font-bold uppercase tracking-widest text-industrial-text-muted">TESTED BY (TESTED)</p>
-        </div>
-        
-        <div className="text-center">
-          <div className="border-b border-industrial-border pb-4 mb-2">
-            <select 
-              className="w-full text-center bg-transparent font-bold text-industrial-text uppercase outline-none text-xs"
-              value={data.reviewed_by || ''}
-              onChange={(e) => handleFieldChange('reviewed_by', e.target.value)}
-              disabled={currentRole === 'Admin_Tested'}
-            >
-              <option value="">Select Reviewer</option>
-              {NAMES_REVIEWERS.map(n => <option key={n} value={n}>{n}</option>)}
-            </select>
-            {data.reviewed_at && <div className="text-[10px] text-industrial-text-muted mt-1 italic">{data.reviewed_at}</div>}
-          </div>
-          <p className="text-[10px] font-bold uppercase tracking-widest text-industrial-text-muted">REVIEWED BY (REVIEWED)</p>
-        </div>
-
-        <div className="text-center">
-          <div className="border-b border-industrial-border pb-4 mb-2">
-            <select 
-              className="w-full text-center bg-transparent font-bold text-industrial-text uppercase outline-none text-xs"
-              value={data.authorized_by || ''}
-              onChange={(e) => handleFieldChange('authorized_by', e.target.value)}
-              disabled={currentRole === 'Admin_Tested'}
-            >
-              <option value="">Select Authorizer</option>
-              {NAMES_AUTHORIZERS.map(n => <option key={n} value={n}>{n}</option>)}
-            </select>
-            {data.authorized_at && <div className="text-[10px] text-industrial-text-muted mt-1 italic">{data.authorized_at}</div>}
-          </div>
-          <p className="text-[10px] font-bold uppercase tracking-widest text-industrial-text-muted">AUTHORIZED BY (AUTHORIZED)</p>
-        </div>
-      </div>
+      <SignOffSection data={data} onChange={handleFieldChange} currentRole={currentRole} />
     </div>
   );
 }
@@ -688,7 +908,9 @@ function BushingTestForm({ test, onUpdate }: { test: TransformerTest, onUpdate: 
   const currentRole = ctx?.currentRole || 'Admin_Tested';
 
   const handleFieldChange = (key: string, value: string) => {
-    onUpdate({ ...data, [key]: value });
+    const updated = { ...data, [key]: value };
+    stampSignOffDate(updated, key, value, SIGN_OFF_AT_MAP);
+    onUpdate(updated);
   };
 
   const BUSHING_VOLTAGES = ['05 KV', '10 KV'];
@@ -744,56 +966,7 @@ function BushingTestForm({ test, onUpdate }: { test: TransformerTest, onUpdate: 
           </table>
         </section>
       ))}
-
-      {/* Signature Section */}
-      <div className="mt-8 pt-8 border-t border-industrial-border grid grid-cols-1 md:grid-cols-3 gap-8">
-        <div className="text-center">
-          <div className="border-b border-industrial-border pb-4 mb-2">
-            <select 
-              className="w-full text-center bg-transparent font-bold text-industrial-text uppercase outline-none text-xs"
-              value={data.tested_by || ''}
-              onChange={(e) => handleFieldChange('tested_by', e.target.value)}
-            >
-              <option value="">Select Technician</option>
-              {NAMES_TECHNICIANS.map(n => <option key={n} value={n}>{n}</option>)}
-            </select>
-            {data.tested_at && <div className="text-[10px] text-industrial-text-muted mt-1 italic">{data.tested_at}</div>}
-          </div>
-          <p className="text-[10px] font-bold uppercase tracking-widest text-industrial-text-muted">TESTED BY (TESTED)</p>
-        </div>
-        
-        <div className="text-center">
-          <div className="border-b border-industrial-border pb-4 mb-2">
-            <select 
-              className="w-full text-center bg-transparent font-bold text-industrial-text uppercase outline-none text-xs"
-              value={data.reviewed_by || ''}
-              onChange={(e) => handleFieldChange('reviewed_by', e.target.value)}
-              disabled={currentRole === 'Admin_Tested'}
-            >
-              <option value="">Select Reviewer</option>
-              {NAMES_REVIEWERS.map(n => <option key={n} value={n}>{n}</option>)}
-            </select>
-            {data.reviewed_at && <div className="text-[10px] text-industrial-text-muted mt-1 italic">{data.reviewed_at}</div>}
-          </div>
-          <p className="text-[10px] font-bold uppercase tracking-widest text-industrial-text-muted">REVIEWED BY (REVIEWED)</p>
-        </div>
-
-        <div className="text-center">
-          <div className="border-b border-industrial-border pb-4 mb-2">
-            <select 
-              className="w-full text-center bg-transparent font-bold text-industrial-text uppercase outline-none text-xs"
-              value={data.authorized_by || ''}
-              onChange={(e) => handleFieldChange('authorized_by', e.target.value)}
-              disabled={currentRole === 'Admin_Tested'}
-            >
-              <option value="">Select Authorizer</option>
-              {NAMES_AUTHORIZERS.map(n => <option key={n} value={n}>{n}</option>)}
-            </select>
-            {data.authorized_at && <div className="text-[10px] text-industrial-text-muted mt-1 italic">{data.authorized_at}</div>}
-          </div>
-          <p className="text-[10px] font-bold uppercase tracking-widest text-industrial-text-muted">AUTHORIZED BY (AUTHORIZED)</p>
-        </div>
-      </div>
+      <SignOffSection data={data} onChange={handleFieldChange} currentRole={currentRole} />
     </div>
   );
 }
@@ -890,26 +1063,8 @@ function PostConnectionTestForm({ test, job, onUpdate }: { test: TransformerTest
     const updated = { ...data, [key]: value };
 
     // Auto calculate date and time when roles are selected
-    if (key === 'pct_tested_by') {
-      if (value) {
-        updated['pct_tested_date'] = new Date().toLocaleString();
-      } else {
-        updated['pct_tested_date'] = '';
-      }
-    }
-    if (key === 'pct_reviewed_by') {
-      if (value) {
-        updated['pct_reviewed_date'] = new Date().toLocaleString();
-      } else {
-        updated['pct_reviewed_date'] = '';
-      }
-    }
-    if (key === 'pct_authorized_by') {
-      if (value) {
-        updated['pct_authorized_date'] = new Date().toLocaleString();
-      } else {
-        updated['pct_authorized_date'] = '';
-      }
+    if (key === 'pct_tested_by' || key === 'pct_reviewed_by' || key === 'pct_authorized_by') {
+      stampSignOffDate(updated, key, value, PCT_SIGN_OFF_DATE_MAP);
     }
 
     // Auto calculate IR ratio (60s/15s)
@@ -1387,8 +1542,7 @@ function PostConnectionTestForm({ test, job, onUpdate }: { test: TransformerTest
               <tr>
                 <th className="p-4 border-r border-b border-industrial-border text-left">TEMINALS</th>
                 <th className="p-4 border-r border-b border-industrial-border text-center">
-                  <div>RESISTANCE @ AMB.</div>
-                  <div className="text-[10px] font-bold text-industrial-text-muted mt-1">Ω</div>
+                  <div>Measured Resistance (Ω)</div>
                 </th>
                 <th className="p-4 border-r border-b border-industrial-border text-center bg-orange-50 text-orange-800">
                   <div>RESISTANCE @75°C</div>
@@ -1465,56 +1619,7 @@ function PostConnectionTestForm({ test, job, onUpdate }: { test: TransformerTest
           </tbody>
         </table>
       </section>
-
-      {/* Signature Section */}
-      <div className="mt-8 pt-8 border-t border-industrial-border grid grid-cols-1 md:grid-cols-3 gap-8">
-        <div className="text-center">
-          <div className="border-b border-industrial-border pb-4 mb-2">
-            <select 
-              className="w-full text-center bg-transparent font-bold text-industrial-text uppercase outline-none text-xs"
-              value={data.pct_tested_by || ''}
-              onChange={(e) => handleFieldChange('pct_tested_by', e.target.value)}
-            >
-              <option value="">Select Technician</option>
-              {NAMES_TECHNICIANS.map(n => <option key={n} value={n}>{n}</option>)}
-            </select>
-            <Field id="pct_tested_date" placeholder="Date & Time" className="text-[10px] mt-1 text-center" />
-          </div>
-          <p className="text-[10px] font-bold uppercase tracking-widest text-industrial-text-muted">TESTED BY</p>
-        </div>
-        
-        <div className="text-center">
-          <div className="border-b border-industrial-border pb-4 mb-2">
-            <select 
-              className="w-full text-center bg-transparent font-bold text-industrial-text uppercase outline-none text-xs"
-              value={data.pct_reviewed_by || ''}
-              onChange={(e) => handleFieldChange('pct_reviewed_by', e.target.value)}
-              disabled={currentRole === 'Admin_Tested'}
-            >
-              <option value="">Select Reviewer</option>
-              {NAMES_REVIEWERS.map(n => <option key={n} value={n}>{n}</option>)}
-            </select>
-            <Field id="pct_reviewed_date" placeholder="Date & Time" className="text-[10px] mt-1 text-center" />
-          </div>
-          <p className="text-[10px] font-bold uppercase tracking-widest text-industrial-text-muted">REVIEWED BY</p>
-        </div>
-
-        <div className="text-center">
-          <div className="border-b border-industrial-border pb-4 mb-2">
-            <select 
-              className="w-full text-center bg-transparent font-bold text-industrial-text uppercase outline-none text-xs"
-              value={data.pct_authorized_by || ''}
-              onChange={(e) => handleFieldChange('pct_authorized_by', e.target.value)}
-              disabled={currentRole === 'Admin_Tested'}
-            >
-              <option value="">Select Authorizer</option>
-              {NAMES_AUTHORIZERS.map(n => <option key={n} value={n}>{n}</option>)}
-            </select>
-            <Field id="pct_authorized_date" placeholder="Date & Time" className="text-[10px] mt-1 text-center" />
-          </div>
-          <p className="text-[10px] font-bold uppercase tracking-widest text-industrial-text-muted">AUTHORIZED BY</p>
-        </div>
-      </div>
+      <SignOffSection data={data} onChange={handleFieldChange} currentRole={currentRole} roles={PCT_SIGN_OFF_ROLES} />
     </div>
     </FormContext.Provider>
   );
@@ -1653,14 +1758,8 @@ function PostTankingTestForm({ test, job, onUpdate }: { test: TransformerTest, j
   const handleFieldChange = (key: string, value: string) => {
     const updated = { ...data, [key]: value };
 
-    if (key === 'pt_tested_by') {
-      updated['pt_tested_date'] = value ? new Date().toLocaleString() : '';
-    }
-    if (key === 'pt_reviewed_by') {
-      updated['pt_reviewed_date'] = value ? new Date().toLocaleString() : '';
-    }
-    if (key === 'pt_authorized_by') {
-      updated['pt_authorized_date'] = value ? new Date().toLocaleString() : '';
+    if (key === 'pt_tested_by' || key === 'pt_reviewed_by' || key === 'pt_authorized_by') {
+      stampSignOffDate(updated, key, value, PT_SIGN_OFF_DATE_MAP);
     }
 
     // Auto calculate IR ratio (60s/15s)
@@ -1803,8 +1902,8 @@ function PostTankingTestForm({ test, job, onUpdate }: { test: TransformerTest, j
           <div className="space-y-4">
              <h6 className="text-[10px] font-bold text-industrial-accent uppercase tracking-widest border-b pb-1">Test Date & Time</h6>
              <div className="grid grid-cols-2 gap-4">
-                <Field id="pt_ratio_test_date" placeholder="DD-MM-YYYY" label="Test Date" />
-                <Field id="pt_ratio_test_time" placeholder="HH:MM" label="Test Time" />
+                <Field id="pt_ratio_test_date" type="date" label="Test Date" />
+                <Field id="pt_ratio_test_time" type="time" label="Test Time" />
              </div>
           </div>
         </div>
@@ -2174,8 +2273,7 @@ function PostTankingTestForm({ test, job, onUpdate }: { test: TransformerTest, j
               <tr>
                 <th className="p-3 border-r border-b border-industrial-border text-left font-black">TEMINALS</th>
                 <th className="p-3 border-r border-b border-industrial-border text-center font-black">
-                  <div>RESISTANCE @ AMB.</div>
-                  <div className="text-[10px] font-normal text-slate-400">Ω</div>
+                  <div>Measured Resistance (Ω)</div>
                 </th>
                 <th className="p-3 border-r border-b border-industrial-border text-center bg-orange-50/60 text-orange-800 font-black">
                   <div>RESISTANCE @75°C</div>
@@ -2258,56 +2356,7 @@ function PostTankingTestForm({ test, job, onUpdate }: { test: TransformerTest, j
           </tbody>
         </table>
       </section>
-
-      {/* Signature Section */}
-      <div className="mt-8 pt-8 border-t border-industrial-border grid grid-cols-1 md:grid-cols-3 gap-8">
-        <div className="text-center">
-          <div className="border-b border-industrial-border pb-4 mb-2">
-            <select 
-              className="w-full text-center bg-transparent font-bold text-industrial-text uppercase outline-none text-xs"
-              value={data.pt_tested_by || ''}
-              onChange={(e) => handleFieldChange('pt_tested_by', e.target.value)}
-            >
-              <option value="">Select Technician</option>
-              {NAMES_TECHNICIANS.map(n => <option key={n} value={n}>{n}</option>)}
-            </select>
-            <Field id="pt_tested_date" placeholder="Date" className="text-[10px] mt-1" />
-          </div>
-          <p className="text-[10px] font-bold uppercase tracking-widest text-industrial-text-muted">TESTED BY</p>
-        </div>
-        
-        <div className="text-center">
-          <div className="border-b border-industrial-border pb-4 mb-2">
-            <select 
-              className="w-full text-center bg-transparent font-bold text-industrial-text uppercase outline-none text-xs"
-              value={data.pt_reviewed_by || ''}
-              onChange={(e) => handleFieldChange('pt_reviewed_by', e.target.value)}
-              disabled={currentRole === 'Admin_Tested'}
-            >
-              <option value="">Select Reviewer</option>
-              {NAMES_REVIEWERS.map(n => <option key={n} value={n}>{n}</option>)}
-            </select>
-            <Field id="pt_reviewed_date" placeholder="Date" className="text-[10px] mt-1" />
-          </div>
-          <p className="text-[10px] font-bold uppercase tracking-widest text-industrial-text-muted">REVIEWED BY</p>
-        </div>
-
-        <div className="text-center">
-          <div className="border-b border-industrial-border pb-4 mb-2">
-            <select 
-              className="w-full text-center bg-transparent font-bold text-industrial-text uppercase outline-none text-xs"
-              value={data.pt_authorized_by || ''}
-              onChange={(e) => handleFieldChange('pt_authorized_by', e.target.value)}
-              disabled={currentRole === 'Admin_Tested'}
-            >
-              <option value="">Select Authorizer</option>
-              {NAMES_AUTHORIZERS.map(n => <option key={n} value={n}>{n}</option>)}
-            </select>
-            <Field id="pt_authorized_date" placeholder="Date" className="text-[10px] mt-1" />
-          </div>
-          <p className="text-[10px] font-bold uppercase tracking-widest text-industrial-text-muted">AUTHORIZED BY</p>
-        </div>
-      </div>
+      <SignOffSection data={data} onChange={handleFieldChange} currentRole={currentRole} roles={PT_SIGN_OFF_ROLES} />
     </div>
     </FormContext.Provider>
   );
@@ -2465,6 +2514,7 @@ function HVTestListForm({ test, job, onUpdate }: { test: TransformerTest, job?: 
     if (key === 'hv_iv_remark') {
       updated['hv_sum_Induced_over_voltage_test_res'] = value;
     }
+    stampSignOffDate(updated, key, value, SIGN_OFF_AT_MAP);
     calculateHVSummary(updated);
     onUpdate(updated);
   };
@@ -2546,22 +2596,22 @@ function HVTestListForm({ test, job, onUpdate }: { test: TransformerTest, job?: 
                   <td className="p-3 border-b border-industrial-border font-bold bg-industrial-bg/10 uppercase text-center w-2/3" colSpan={4}>
                     <div className="flex items-center justify-center gap-2">
                       <span className="text-[10px] text-industrial-text-muted">POWER ANALYZER:</span>
-                      <Field id="hv_nll_meter" placeholder="YOKOGAWA MAKE WT3000, SR NO: 91KA21004" className="text-center font-bold bg-transparent border-b border-dashed border-industrial-border focus:border-industrial-accent" />
+                      <Field id="hv_nll_meter" pdfValue="YOKOGAWA MAKE WT3000, SR NO: 91KA21004" className="text-center font-bold bg-transparent border-b border-dashed border-industrial-border focus:border-industrial-accent" />
                     </div>
                   </td>
                 </tr>
                 <tr>
                   <td className="p-2.5 border-r border-b border-industrial-border font-bold bg-industrial-bg/5 text-center w-[15%]">CT RATIO</td>
                   <td className="p-1 border-r border-b border-industrial-border text-center w-[18%]">
-                    <Field id="hv_nll_ct_ratio" placeholder="10/1 A" className="text-center font-bold" />
+                    <Field id="hv_nll_ct_ratio" pdfValue="10/1 A" className="text-center font-bold" />
                   </td>
                   <td className="p-2.5 border-r border-b border-industrial-border font-bold bg-industrial-bg/5 text-center w-[15%]">PT RATIO</td>
                   <td className="p-1 border-r border-b border-industrial-border text-center w-[22%]">
-                    <Field id="hv_nll_pt_ratio" placeholder="33000/√3/110/√3 V" className="text-center font-bold" />
+                    <Field id="hv_nll_pt_ratio" pdfValue="33000/√3/110/√3 V" className="text-center font-bold" />
                   </td>
                   <td className="p-2.5 border-r border-b border-industrial-border font-bold bg-industrial-bg/5 text-center w-[10%]">MF</td>
                   <td className="p-1 border-b border-industrial-border text-center w-[20%]">
-                    <Field id="hv_nll_mf" placeholder="3000" className="text-center font-bold" />
+                    <Field id="hv_nll_mf" pdfValue="3000" className="text-center font-bold" />
                   </td>
                 </tr>
                 <tr>
@@ -2570,30 +2620,30 @@ function HVTestListForm({ test, job, onUpdate }: { test: TransformerTest, job?: 
                     <div className="text-[9px] text-industrial-text-muted mt-1 font-sans leading-tight">MAKE-MOON LIGHT<br/>ELECTICAL</div>
                   </td>
                   <td className="p-1 border-r border-b border-industrial-border text-center">
-                    <Field id="hv_nll_ct_sr_1" placeholder="06/12/413" className="text-center" />
+                    <Field id="hv_nll_ct_sr_1" pdfValue="06/12/413" className="text-center" />
                   </td>
                   <td className="p-2.5 border-r border-b border-industrial-border text-center align-middle bg-industrial-bg/5" rowSpan={3} colSpan={2}>
                     <div className="font-bold text-xs uppercase">PT SR. NOS</div>
                     <div className="text-[9px] text-industrial-text-muted mt-1 font-sans leading-tight">MAKE-MOON LIGHT ELECTICAL</div>
                   </td>
                   <td className="p-1 border-r border-b border-industrial-border text-center" colSpan={2}>
-                    <Field id="hv_nll_pt_sr_1" placeholder="06/12/417" className="text-center" />
+                    <Field id="hv_nll_pt_sr_1" pdfValue="06/12/417" className="text-center" />
                   </td>
                 </tr>
                 <tr>
                   <td className="p-1 border-r border-b border-industrial-border text-center">
-                    <Field id="hv_nll_ct_sr_2" placeholder="06/12/414" className="text-center" />
+                    <Field id="hv_nll_ct_sr_2" pdfValue="06/12/414" className="text-center" />
                   </td>
                   <td className="p-1 border-r border-b border-industrial-border text-center" colSpan={2}>
-                    <Field id="hv_nll_pt_sr_2" placeholder="06/12/418" className="text-center" />
+                    <Field id="hv_nll_pt_sr_2" pdfValue="06/12/418" className="text-center" />
                   </td>
                 </tr>
                 <tr>
                   <td className="p-1 border-r border-industrial-border text-center">
-                    <Field id="hv_nll_ct_sr_3" placeholder="06/12/416" className="text-center" />
+                    <Field id="hv_nll_ct_sr_3" pdfValue="06/12/416" className="text-center" />
                   </td>
                   <td className="p-1 border-industrial-border text-center" colSpan={2}>
-                    <Field id="hv_nll_pt_sr_3" placeholder="06/12/420" className="text-center" />
+                    <Field id="hv_nll_pt_sr_3" pdfValue="06/12/420" className="text-center" />
                   </td>
                 </tr>
               </tbody>
@@ -3144,53 +3194,7 @@ function HVTestListForm({ test, job, onUpdate }: { test: TransformerTest, job?: 
           </table>
         </div>
       </section>
-
-      {/* Signature Section */}
-      <div className="mt-8 pt-8 border-t border-industrial-border grid grid-cols-1 md:grid-cols-3 gap-8">
-        <div className="text-center">
-          <div className="border-b border-industrial-border pb-4 mb-2">
-            <select 
-              className="w-full text-center bg-transparent font-bold text-industrial-text uppercase outline-none text-xs"
-              value={data.tested_by || ''}
-              onChange={(e) => handleFieldChange('tested_by', e.target.value)}
-            >
-              <option value="">Select Technician</option>
-              {NAMES_TECHNICIANS.map(n => <option key={n} value={n}>{n}</option>)}
-            </select>
-          </div>
-          <p className="text-[10px] font-bold uppercase tracking-widest text-industrial-text-muted">TESTED BY</p>
-        </div>
-        
-        <div className="text-center">
-          <div className="border-b border-industrial-border pb-4 mb-2">
-            <select 
-              className="w-full text-center bg-transparent font-bold text-industrial-text uppercase outline-none text-xs"
-              value={data.reviewed_by || ''}
-              onChange={(e) => handleFieldChange('reviewed_by', e.target.value)}
-              disabled={currentRole === 'Admin_Tested'}
-            >
-              <option value="">Select Reviewer</option>
-              {NAMES_REVIEWERS.map(n => <option key={n} value={n}>{n}</option>)}
-            </select>
-          </div>
-          <p className="text-[10px] font-bold uppercase tracking-widest text-industrial-text-muted">REVIEWED BY</p>
-        </div>
-
-        <div className="text-center">
-          <div className="border-b border-industrial-border pb-4 mb-2">
-            <select 
-              className="w-full text-center bg-transparent font-bold text-industrial-text uppercase outline-none text-xs"
-              value={data.authorized_by || ''}
-              onChange={(e) => handleFieldChange('authorized_by', e.target.value)}
-              disabled={currentRole === 'Admin_Tested'}
-            >
-              <option value="">Select Authorizer</option>
-              {NAMES_AUTHORIZERS.map(n => <option key={n} value={n}>{n}</option>)}
-            </select>
-          </div>
-          <p className="text-[10px] font-bold uppercase tracking-widest text-industrial-text-muted">AUTHORIZED BY</p>
-        </div>
-      </div>
+      <SignOffSection data={data} onChange={handleFieldChange} currentRole={currentRole} />
     </div>
     </FormContext.Provider>
   );
@@ -3203,15 +3207,7 @@ function ChecklistForTFRBeforeHV({ test, onUpdate }: { test: TransformerTest, on
 
   const handleFieldChange = (key: string, value: string) => {
     const updated = { ...data, [key]: value };
-    if (key === 'tested_by') {
-      updated['tested_date'] = value ? new Date().toLocaleString() : '';
-    }
-    if (key === 'reviewed_by') {
-      updated['reviewed_date'] = value ? new Date().toLocaleString() : '';
-    }
-    if (key === 'authorized_by') {
-      updated['authorized_date'] = value ? new Date().toLocaleString() : '';
-    }
+    stampSignOffDate(updated, key, value, SIGN_OFF_AT_MAP);
     onUpdate(updated);
   };
 
@@ -3322,16 +3318,13 @@ function ChecklistForTFRBeforeHV({ test, onUpdate }: { test: TransformerTest, on
                       </div>
                     ) : hasConfCheckbox ? (
                       <div className="w-full min-h-[32px] flex items-center justify-center rounded">
-                        <button
-                          onClick={() => handleFieldChange(`chk_conf_${idx+1}`, isConfChecked ? 'PENDING' : 'DONE')}
-                          className={`flex items-center justify-center w-6 h-6 border-2 rounded transition-all ${
-                            isConfChecked
-                              ? 'bg-blue-600 border-blue-600 text-white shadow-sm hover:bg-blue-700'
-                              : 'border-slate-300 text-transparent hover:border-slate-400 bg-white'
-                          }`}
-                        >
-                          <Check size={14} className="stroke-[3]" />
-                        </button>
+                        <input
+                          type="checkbox"
+                          checked={isConfChecked}
+                          onChange={() => handleFieldChange(`chk_conf_${idx+1}`, isConfChecked ? 'PENDING' : 'DONE')}
+                          className="w-5 h-5 accent-blue-600 cursor-pointer"
+                          aria-label={`Confirmation ${idx + 1}`}
+                        />
                       </div>
                     ) : (
                       <div className="text-slate-400 text-xs italic text-center">-</div>
@@ -3348,54 +3341,7 @@ function ChecklistForTFRBeforeHV({ test, onUpdate }: { test: TransformerTest, on
           </tbody>
         </table>
       </div>
-
-      {/* Signature Section */}
-      <div className="mt-8 pt-8 border-t border-industrial-border grid grid-cols-1 md:grid-cols-3 gap-8">
-        <div className="text-center">
-          <div className="border-b border-industrial-border pb-4 mb-2">
-            <select 
-              className="w-full text-center bg-transparent font-bold text-industrial-text uppercase outline-none text-xs"
-              value={data.tested_by || ''}
-              onChange={(e) => handleFieldChange('tested_by', e.target.value)}
-            >
-              <option value="">Select Technician</option>
-              {NAMES_TECHNICIANS.map(n => <option key={n} value={n}>{n}</option>)}
-            </select>
-            <Field id="tested_date" placeholder="Date" className="text-[10px] mt-1 text-center" />
-          </div>
-          <p className="text-[10px] font-bold uppercase tracking-widest text-industrial-text-muted">TESTED BY</p>
-        </div>
-        
-        <div className="text-center">
-          <div className="border-b border-industrial-border pb-4 mb-2">
-            <select 
-              className="w-full text-center bg-transparent font-bold text-industrial-text uppercase outline-none text-xs"
-              value={data.reviewed_by || ''}
-              onChange={(e) => handleFieldChange('reviewed_by', e.target.value)}
-            >
-              <option value="">Select Reviewer</option>
-              {NAMES_REVIEWERS.map(n => <option key={n} value={n}>{n}</option>)}
-            </select>
-            <Field id="reviewed_date" placeholder="Date" className="text-[10px] mt-1 text-center" />
-          </div>
-          <p className="text-[10px] font-bold uppercase tracking-widest text-industrial-text-muted">REVIEWED BY</p>
-        </div>
-
-        <div className="text-center">
-          <div className="border-b border-industrial-border pb-4 mb-2">
-            <select 
-              className="w-full text-center bg-transparent font-bold text-industrial-text uppercase outline-none text-xs"
-              value={data.authorized_by || ''}
-              onChange={(e) => handleFieldChange('authorized_by', e.target.value)}
-            >
-              <option value="">Select Authorizer</option>
-              {NAMES_AUTHORIZERS.map(n => <option key={n} value={n}>{n}</option>)}
-            </select>
-            <Field id="authorized_date" placeholder="Date" className="text-[10px] mt-1 text-center" />
-          </div>
-          <p className="text-[10px] font-bold uppercase tracking-widest text-industrial-text-muted">AUTHORIZED BY</p>
-        </div>
-      </div>
+      <SignOffSection data={data} onChange={handleFieldChange} currentRole={currentRole} />
     </div>
   );
 }
@@ -3513,6 +3459,7 @@ function PreConnectionTestForm({ test, job, onUpdate }: { test: TransformerTest,
       });
     }
 
+    stampSignOffDate(updated, key, value, SIGN_OFF_AT_MAP);
     onUpdate(updated);
   };
 
@@ -3540,7 +3487,7 @@ function PreConnectionTestForm({ test, job, onUpdate }: { test: TransformerTest,
                 <td className="p-2 bg-slate-100 font-bold text-center" style={{ width: '35%' }}>Details of Insulation Tester</td>
               </tr>
               <tr className="border-b border-industrial-border">
-                <td className="p-2 bg-slate-50 border-r border-industrial-border font-bold text-center">Ambiant Temp (&deg;C):</td>
+                <td className="p-2 bg-slate-50 border-r border-industrial-border font-bold text-center">Ambient Temp (&deg;C):</td>
                 <td className="p-1 border-r border-industrial-border bg-white text-center"><Field id="ir_amb_temp" placeholder="" className="text-center" /></td>
                 <td className="p-2 bg-slate-50 border-r border-industrial-border font-bold text-center" colSpan={2}>Make:</td>
                 <td className="p-1 bg-white text-center"><Field id="ir_tester_make" placeholder="MEGGER" className="text-center" /></td>
@@ -3587,7 +3534,7 @@ function PreConnectionTestForm({ test, job, onUpdate }: { test: TransformerTest,
                   <Field id="ir_winding_earth_60s" placeholder="-" className="w-full" />
                 </td>
                 <td className="p-1 border-industrial-border">
-                  <Field id="ir_winding_earth_ratio" placeholder="-" className="w-full" />
+                  <Field id="ir_winding_earth_ratio" placeholder="-" readOnly={true} className="w-full text-center font-bold bg-slate-50" />
                 </td>
               </tr>
             </tbody>
@@ -3859,8 +3806,7 @@ function PreConnectionTestForm({ test, job, onUpdate }: { test: TransformerTest,
               <tr>
                 <th className="p-4 border-r border-b border-industrial-border text-left">TEMINALS</th>
                 <th className="p-4 border-r border-b border-industrial-border text-center">
-                  <div>Resistance @ Amb.</div>
-                  <div className="text-[10px] font-bold text-industrial-text-muted mt-1">Ω</div>
+                  <div>Measured Resistance (Ω)</div>
                 </th>
                 <th className="p-4 border-r border-b border-industrial-border text-center bg-orange-50 text-orange-800">
                   <div>Resistance @75°C</div>
@@ -3892,56 +3838,7 @@ function PreConnectionTestForm({ test, job, onUpdate }: { test: TransformerTest,
           </table>
         </div>
       </section>
-
-      {/* Signature Section */}
-      <div className="mt-8 pt-8 border-t border-industrial-border grid grid-cols-1 md:grid-cols-3 gap-8">
-        <div className="text-center">
-          <div className="border-b border-industrial-border pb-4 mb-2">
-            <select 
-              className="w-full text-center bg-transparent font-bold text-industrial-text uppercase outline-none text-xs"
-              value={data.tested_by || ''}
-              onChange={(e) => handleFieldChange('tested_by', e.target.value)}
-            >
-              <option value="">Select Technician</option>
-              {NAMES_TECHNICIANS.map(n => <option key={n} value={n}>{n}</option>)}
-            </select>
-            {data.tested_at && <div className="text-[10px] text-industrial-text-muted mt-1 italic">{data.tested_at}</div>}
-          </div>
-          <p className="text-[10px] font-bold uppercase tracking-widest text-industrial-text-muted">TESTED BY (TESTED)</p>
-        </div>
-        
-        <div className="text-center">
-          <div className="border-b border-industrial-border pb-4 mb-2">
-            <select 
-              className="w-full text-center bg-transparent font-bold text-industrial-text uppercase outline-none text-xs"
-              value={data.reviewed_by || ''}
-              onChange={(e) => handleFieldChange('reviewed_by', e.target.value)}
-              disabled={currentRole === 'Admin_Tested'}
-            >
-              <option value="">Select Reviewer</option>
-              {NAMES_REVIEWERS.map(n => <option key={n} value={n}>{n}</option>)}
-            </select>
-            {data.reviewed_at && <div className="text-[10px] text-industrial-text-muted mt-1 italic">{data.reviewed_at}</div>}
-          </div>
-          <p className="text-[10px] font-bold uppercase tracking-widest text-industrial-text-muted">REVIEWED BY (REVIEWED)</p>
-        </div>
-
-        <div className="text-center">
-          <div className="border-b border-industrial-border pb-4 mb-2">
-            <select 
-              className="w-full text-center bg-transparent font-bold text-industrial-text uppercase outline-none text-xs"
-              value={data.authorized_by || ''}
-              onChange={(e) => handleFieldChange('authorized_by', e.target.value)}
-              disabled={currentRole === 'Admin_Tested'}
-            >
-              <option value="">Select Authorizer</option>
-              {NAMES_AUTHORIZERS.map(n => <option key={n} value={n}>{n}</option>)}
-            </select>
-            {data.authorized_at && <div className="text-[10px] text-industrial-text-muted mt-1 italic">{data.authorized_at}</div>}
-          </div>
-          <p className="text-[10px] font-bold uppercase tracking-widest text-industrial-text-muted">AUTHORIZED BY (AUTHORIZED)</p>
-        </div>
-      </div>
+      <SignOffSection data={data} onChange={handleFieldChange} currentRole={currentRole} />
     </div>
     </FormContext.Provider>
   );
@@ -4196,15 +4093,7 @@ function FinalLVTestForm({ test, job, onUpdate }: { test: TransformerTest, job?:
   const handleFieldChange = (key: string, value: string) => {
     const updated = { ...data, [key]: value };
 
-    if (key === 'offered_by') {
-      updated['offered_date'] = value ? new Date().toLocaleString() : '';
-    }
-    if (key === 'tested_by') {
-      updated['tested_date'] = value ? new Date().toLocaleString() : '';
-    }
-    if (key === 'authorized_by') {
-      updated['authorized_date'] = value ? new Date().toLocaleString() : '';
-    }
+    stampSignOffDate(updated, key, value, SIGN_OFF_AT_MAP);
 
     // Auto calculate IR ratio (60s/15s)
     if (key === 'lv_ir_15s' || key === 'lv_ir_60s') {
@@ -4797,8 +4686,7 @@ function FinalLVTestForm({ test, job, onUpdate }: { test: TransformerTest, job?:
               <tr>
                 <th className="p-3 border-r border-b border-industrial-border text-left font-black">TEMINALS</th>
                 <th className="p-3 border-r border-b border-industrial-border text-center font-black">
-                  <div>RESISTANCE @ AMB.</div>
-                  <div className="text-[10px] font-normal text-slate-400">Ω</div>
+                  <div>Measured Resistance (Ω)</div>
                 </th>
                 <th className="p-3 border-r border-b border-industrial-border text-center bg-orange-50/60 text-orange-800 font-black">
                   <div>RESISTANCE @75°C</div>
@@ -5092,7 +4980,7 @@ function FinalLVTestForm({ test, job, onUpdate }: { test: TransformerTest, job?:
                 <td className="p-2 bg-slate-100 font-bold text-center" style={{ width: '35%' }}>Details of Insulation Tester</td>
               </tr>
               <tr className="border-b border-industrial-border">
-                <td className="p-2 bg-slate-50 border-r border-industrial-border font-bold text-center">Ambiant Temp (&deg;C):</td>
+                <td className="p-2 bg-slate-50 border-r border-industrial-border font-bold text-center">Ambient Temp (&deg;C):</td>
                 <td className="p-1 border-r border-industrial-border bg-white text-center"><Field id="lv_pi_amb_temp" placeholder="" className="text-center" /></td>
                 <td className="p-2 bg-slate-50 border-r border-industrial-border font-bold text-center" colSpan={2}>Make:</td>
                 <td className="p-1 bg-white text-center"><Field id="lv_pi_make" placeholder="MEGGER" className="text-center" /></td>
@@ -5162,56 +5050,7 @@ function FinalLVTestForm({ test, job, onUpdate }: { test: TransformerTest, job?:
           </table>
         </div>
       </section>
-
-      {/* Signature Section */}
-      <div className="mt-8 pt-8 border-t border-industrial-border grid grid-cols-1 md:grid-cols-3 gap-8">
-        <div className="text-center">
-          <div className="border-b border-industrial-border pb-4 mb-2">
-            <select 
-              className="w-full text-center bg-transparent font-bold text-industrial-text uppercase outline-none text-xs"
-              value={data.offered_by || ''}
-              onChange={(e) => handleFieldChange('offered_by', e.target.value)}
-            >
-              <option value="">Select Technician</option>
-              {NAMES_TECHNICIANS.map(n => <option key={n} value={n}>{n}</option>)}
-            </select>
-            <Field id="offered_date" placeholder="Date" className="text-[10px] mt-1 text-center" />
-          </div>
-          <p className="text-[10px] font-bold uppercase tracking-widest text-industrial-text-muted">TESTED BY</p>
-        </div>
-        
-        <div className="text-center">
-          <div className="border-b border-industrial-border pb-4 mb-2">
-            <select 
-              className="w-full text-center bg-transparent font-bold text-industrial-text uppercase outline-none text-xs"
-              value={data.tested_by || ''}
-              onChange={(e) => handleFieldChange('tested_by', e.target.value)}
-              disabled={currentRole === 'Admin_Tested'}
-            >
-              <option value="">Select Reviewer</option>
-              {NAMES_REVIEWERS.map(n => <option key={n} value={n}>{n}</option>)}
-            </select>
-            <Field id="tested_date" placeholder="Date" className="text-[10px] mt-1 text-center" />
-          </div>
-          <p className="text-[10px] font-bold uppercase tracking-widest text-industrial-text-muted">REVIEWED BY</p>
-        </div>
-
-        <div className="text-center">
-          <div className="border-b border-industrial-border pb-4 mb-2">
-            <select 
-              className="w-full text-center bg-transparent font-bold text-industrial-text uppercase outline-none text-xs"
-              value={data.authorized_by || ''}
-              onChange={(e) => handleFieldChange('authorized_by', e.target.value)}
-              disabled={currentRole === 'Admin_Tested'}
-            >
-              <option value="">Select Authorizer</option>
-              {NAMES_AUTHORIZERS.map(n => <option key={n} value={n}>{n}</option>)}
-            </select>
-            <Field id="authorized_date" placeholder="Date" className="text-[10px] mt-1 text-center" />
-          </div>
-          <p className="text-[10px] font-bold uppercase tracking-widest text-industrial-text-muted">AUTHORIZED BY</p>
-        </div>
-      </div>
+      <SignOffSection data={data} onChange={handleFieldChange} currentRole={currentRole} roles={FINAL_LV_SIGN_OFF_ROLES} />
     </div>
     </FormContext.Provider>
   );
@@ -5223,7 +5062,9 @@ function TwoKVTestForm({ test, onUpdate }: { test: TransformerTest, onUpdate: (d
   const currentRole = ctx?.currentRole || 'Admin_Tested';
 
   const handleFieldChange = (key: string, value: string) => {
-    onUpdate({ ...data, [key]: value });
+    const updated = { ...data, [key]: value };
+    stampSignOffDate(updated, key, value, SIGN_OFF_AT_MAP);
+    onUpdate(updated);
   };
 
   const SECTIONS = ['HORIZANTAL', 'VERTICAL'] as const;
@@ -5266,54 +5107,7 @@ function TwoKVTestForm({ test, onUpdate }: { test: TransformerTest, onUpdate: (d
           </table>
         </section>
       ))}
-
-      {/* Signature Section */}
-      <div className="mt-8 pt-8 border-t border-industrial-border grid grid-cols-1 md:grid-cols-3 gap-8">
-        <div className="text-center">
-          <div className="border-b border-industrial-border pb-4 mb-2">
-            <select 
-              className="w-full text-center bg-transparent font-bold text-industrial-text uppercase outline-none text-xs"
-              value={data.tested_by || ''}
-              onChange={(e) => handleFieldChange('tested_by', e.target.value)}
-            >
-              <option value="">Select Technician</option>
-              {NAMES_TECHNICIANS.map(n => <option key={n} value={n}>{n}</option>)}
-            </select>
-            {data.tested_at && <div className="text-[10px] text-industrial-text-muted mt-1 italic">{data.tested_at}</div>}
-          </div>
-          <p className="text-[10px] font-bold uppercase tracking-widest text-industrial-text-muted">TESTED BY (TESTED)</p>
-        </div>
-        
-        <div className="text-center">
-          <div className="border-b border-industrial-border pb-4 mb-2">
-            <select 
-              className="w-full text-center bg-transparent font-bold text-industrial-text uppercase outline-none text-xs"
-              value={data.reviewed_by || ''}
-              onChange={(e) => handleFieldChange('reviewed_by', e.target.value)}
-            >
-              <option value="">Select Reviewer</option>
-              {NAMES_REVIEWERS.map(n => <option key={n} value={n}>{n}</option>)}
-            </select>
-            {data.reviewed_at && <div className="text-[10px] text-industrial-text-muted mt-1 italic">{data.reviewed_at}</div>}
-          </div>
-          <p className="text-[10px] font-bold uppercase tracking-widest text-industrial-text-muted">REVIEWED BY (REVIEWED)</p>
-        </div>
-
-        <div className="text-center">
-          <div className="border-b border-industrial-border pb-4 mb-2">
-            <select 
-              className="w-full text-center bg-transparent font-bold text-industrial-text uppercase outline-none text-xs"
-              value={data.authorized_by || ''}
-              onChange={(e) => handleFieldChange('authorized_by', e.target.value)}
-            >
-              <option value="">Select Authorizer</option>
-              {NAMES_AUTHORIZERS.map(n => <option key={n} value={n}>{n}</option>)}
-            </select>
-            {data.authorized_at && <div className="text-[10px] text-industrial-text-muted mt-1 italic">{data.authorized_at}</div>}
-          </div>
-          <p className="text-[10px] font-bold uppercase tracking-widest text-industrial-text-muted">AUTHORIZED BY (AUTHORIZED)</p>
-        </div>
-      </div>
+      <SignOffSection data={data} onChange={handleFieldChange} currentRole={currentRole} />
     </div>
   );
 }
@@ -5389,6 +5183,7 @@ function PrePostVpdServicingForm({ test, onUpdate }: { test: TransformerTest, on
         }
       }
     });
+    stampSignOffDate(updated, key, value, SIGN_OFF_AT_MAP);
     onUpdate(updated);
   };
 
@@ -5495,7 +5290,7 @@ function PrePostVpdServicingForm({ test, onUpdate }: { test: TransformerTest, on
                          <Field id={`${process.toLowerCase()}_ir_60s`} placeholder="-" />
                       </td>
                       <td className="p-1">
-                         <Field id={`${process.toLowerCase()}_ir_ratio`} pdfValue="-" placeholder="-" className="text-center font-bold" />
+                         <Field id={`${process.toLowerCase()}_ir_ratio`} pdfValue="-" placeholder="-" readOnly={true} className="text-center font-bold bg-slate-50" />
                       </td>
                     </tr>
                   </tbody>
@@ -5564,56 +5359,7 @@ function PrePostVpdServicingForm({ test, onUpdate }: { test: TransformerTest, on
             </div>
           </section>
         ))}
-
-        {/* Signature Section */}
-        <div className="mt-8 pt-8 border-t border-industrial-border grid grid-cols-1 md:grid-cols-3 gap-8">
-          <div className="text-center">
-            <div className="border-b border-industrial-border pb-4 mb-2">
-              <select 
-                className="w-full text-center bg-transparent font-bold text-industrial-text uppercase outline-none text-xs"
-                value={data.tested_by || ''}
-                onChange={(e) => handleFieldChange('tested_by', e.target.value)}
-              >
-                <option value="">Select Technician</option>
-                {NAMES_TECHNICIANS.map(n => <option key={n} value={n}>{n}</option>)}
-              </select>
-              <Field id="tested_date" placeholder="Date" className="text-[10px] mt-1" />
-            </div>
-            <p className="text-[10px] font-bold uppercase tracking-widest text-industrial-text-muted">TESTED BY</p>
-          </div>
-          
-          <div className="text-center">
-            <div className="border-b border-industrial-border pb-4 mb-2">
-              <select 
-                className="w-full text-center bg-transparent font-bold text-industrial-text uppercase outline-none text-xs"
-                value={data.reviewed_by || ''}
-                onChange={(e) => handleFieldChange('reviewed_by', e.target.value)}
-                disabled={currentRole === 'Admin_Tested'}
-              >
-                <option value="">Select Reviewer</option>
-                {NAMES_REVIEWERS.map(n => <option key={n} value={n}>{n}</option>)}
-              </select>
-              <Field id="reviewed_date" placeholder="Date" className="text-[10px] mt-1" />
-            </div>
-            <p className="text-[10px] font-bold uppercase tracking-widest text-industrial-text-muted">REVIEWED BY</p>
-          </div>
-
-          <div className="text-center">
-            <div className="border-b border-industrial-border pb-4 mb-2">
-              <select 
-                className="w-full text-center bg-transparent font-bold text-industrial-text uppercase outline-none text-xs"
-                value={data.authorized_by || ''}
-                onChange={(e) => handleFieldChange('authorized_by', e.target.value)}
-                disabled={currentRole === 'Admin_Tested'}
-              >
-                <option value="">Select Authorizer</option>
-                {NAMES_AUTHORIZERS.map(n => <option key={n} value={n}>{n}</option>)}
-              </select>
-              <Field id="authorized_date" placeholder="Date" className="text-[10px] mt-1" />
-            </div>
-            <p className="text-[10px] font-bold uppercase tracking-widest text-industrial-text-muted">AUTHORIZED BY</p>
-          </div>
-        </div>
+      <SignOffSection data={data} onChange={handleFieldChange} currentRole={currentRole} />
       </div>
     </FormContext.Provider>
   );
@@ -5626,15 +5372,7 @@ function OilSoakingServicingForm({ test, onUpdate }: { test: TransformerTest, on
 
   const handleFieldChange = (key: string, value: string) => {
     const updated = { ...data, [key]: value };
-    if (key === 'tested_by') {
-      updated['tested_date'] = value ? new Date().toLocaleString() : '';
-    }
-    if (key === 'reviewed_by') {
-      updated['reviewed_date'] = value ? new Date().toLocaleString() : '';
-    }
-    if (key === 'authorized_by') {
-      updated['authorized_date'] = value ? new Date().toLocaleString() : '';
-    }
+    stampSignOffDate(updated, key, value, SIGN_OFF_AT_MAP);
     onUpdate(updated);
   };
 
@@ -5736,56 +5474,7 @@ function OilSoakingServicingForm({ test, onUpdate }: { test: TransformerTest, on
           </div>
         </section>
       ))}
-
-      {/* Signature Section */}
-      <div className="mt-8 pt-8 border-t border-industrial-border grid grid-cols-1 md:grid-cols-3 gap-8">
-        <div className="text-center">
-          <div className="border-b border-industrial-border pb-4 mb-2">
-            <select 
-              className="w-full text-center bg-transparent font-bold text-industrial-text uppercase outline-none text-xs"
-              value={data.tested_by || ''}
-              onChange={(e) => handleFieldChange('tested_by', e.target.value)}
-            >
-              <option value="">Select Technician</option>
-              {NAMES_TECHNICIANS.map(n => <option key={n} value={n}>{n}</option>)}
-            </select>
-          </div>
-          <p className="text-[10px] font-bold uppercase tracking-widest text-industrial-text-muted">TESTED BY</p>
-          <Field id="tested_date" placeholder="Date" className="text-[10px] mt-1" />
-        </div>
-        
-        <div className="text-center">
-          <div className="border-b border-industrial-border pb-4 mb-2">
-            <select 
-              className="w-full text-center bg-transparent font-bold text-industrial-text uppercase outline-none text-xs"
-              value={data.reviewed_by || ''}
-              onChange={(e) => handleFieldChange('reviewed_by', e.target.value)}
-              disabled={currentRole === 'Admin_Tested'}
-            >
-              <option value="">Select Reviewer</option>
-              {NAMES_REVIEWERS.map(n => <option key={n} value={n}>{n}</option>)}
-            </select>
-          </div>
-          <p className="text-[10px] font-bold uppercase tracking-widest text-industrial-text-muted">REVIEWED BY</p>
-          <Field id="reviewed_date" placeholder="Date" className="text-[10px] mt-1" />
-        </div>
-
-        <div className="text-center">
-          <div className="border-b border-industrial-border pb-4 mb-2">
-            <select 
-              className="w-full text-center bg-transparent font-bold text-industrial-text uppercase outline-none text-xs"
-              value={data.authorized_by || ''}
-              onChange={(e) => handleFieldChange('authorized_by', e.target.value)}
-              disabled={currentRole === 'Admin_Tested'}
-            >
-              <option value="">Select Authorizer</option>
-              {NAMES_AUTHORIZERS.map(n => <option key={n} value={n}>{n}</option>)}
-            </select>
-          </div>
-          <p className="text-[10px] font-bold uppercase tracking-widest text-industrial-text-muted">AUTHORIZED BY</p>
-          <Field id="authorized_date" placeholder="Date" className="text-[10px] mt-1" />
-        </div>
-      </div>
+      <SignOffSection data={data} onChange={handleFieldChange} currentRole={currentRole} />
     </div>
   );
 }
@@ -5802,10 +5491,57 @@ export default function App() {
   const [authConfirmPassword, setAuthConfirmPassword] = useState('');
   const [authRole, setAuthRole] = useState<AuthRole>('Tester');
   const [authError, setAuthError] = useState('');
+  const [canBootstrapAuthorizer, setCanBootstrapAuthorizer] = useState(false);
+  const [offlineMode, setOfflineModeState] = useState(() => isOfflineMode());
+  const [editingTestId, setEditingTestId] = useState<string | null>(null);
+  const [staffRole, setStaffRole] = useState<AuthRole>('Tester');
+  const [staffName, setStaffName] = useState('');
+  const [staffUsername, setStaffUsername] = useState('');
+  const [staffPassword, setStaffPassword] = useState('');
+  const [staffConfirmPassword, setStaffConfirmPassword] = useState('');
+  const [staffError, setStaffError] = useState('');
+  const [roleNotifications, setRoleNotifications] = useState<AppNotification[]>([]);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
+
+  const currentAuthRole = currentUser?.role || userRoleToAuthRole(currentRole);
+
+  const refreshNotifications = (role?: AuthRole) => {
+    const target = role || currentUser?.role || userRoleToAuthRole(currentRole);
+    setRoleNotifications(listNotificationsForRole(target));
+  };
+
+  const notifyRole = (
+    role: AuthRole,
+    title: string,
+    message: string,
+    meta?: { jobId?: string; testId?: string },
+    showToastForCurrentUser = true
+  ) => {
+    pushNotification({ role, title, message, jobId: meta?.jobId, testId: meta?.testId });
+    const activeRole = currentUser?.role || userRoleToAuthRole(currentRole);
+    if (activeRole === role) {
+      refreshNotifications(role);
+      if (showToastForCurrentUser) {
+        setToast({ message: `${title}: ${message}`, type: 'info' });
+      }
+    }
+  };
+
+  const enableOfflineMode = (jobsToLoad = true) => {
+    setOfflineMode(true);
+    setOfflineModeState(true);
+    if (jobsToLoad) setJobs(loadLocalJobs());
+  };
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<JobStatus>('Processing');
   const [filterCapacity, setFilterCapacity] = useState<string>('All');
   const [filterType, setFilterType] = useState<string>('All');
+  const [jobSearchQuery, setJobSearchQuery] = useState('');
+  const [deleteJobConfirm, setDeleteJobConfirm] = useState<{
+    jobId: string;
+    jobName: string;
+    step: 1 | 2;
+  } | null>(null);
   const [currentSelection, setCurrentSelection] = useState<{
     capacity?: TransformerCapacity;
     type?: TransformerType;
@@ -5817,6 +5553,38 @@ export default function App() {
     let cancelled = false;
 
     const boot = async () => {
+      if (isOfflineMode()) {
+        if (!cancelled) {
+          setOfflineModeState(true);
+          setCurrentUser({
+            id: 'local-skip-authorizer',
+            name: 'Authorizer (Skipped)',
+            username: 'authorizer-skip',
+            role: 'Authorizer',
+            createdAt: Date.now(),
+          });
+          setCurrentRole('Admin_Authorized');
+          setJobs(loadLocalJobs());
+          setRoleNotifications(listNotificationsForRole('Authorizer'));
+          setView('DASHBOARD');
+        }
+        return;
+      }
+
+      try {
+        const status = await api.registrationStatus();
+        if (!cancelled) {
+          setCanBootstrapAuthorizer(status.canBootstrapAuthorizer);
+          if (status.canBootstrapAuthorizer) {
+            setAuthRole('Authorizer');
+          } else {
+            setAuthMode('login');
+          }
+        }
+      } catch {
+        // API may be offline; keep default login UI
+      }
+
       if (!api.getToken()) return;
       try {
         const me = await api.me();
@@ -5824,6 +5592,7 @@ export default function App() {
         setCurrentUser(me.user);
         setCurrentRole(me.userRole);
         setView('DASHBOARD');
+        setRoleNotifications(listNotificationsForRole(me.user.role));
         const { jobs: remoteJobs } = await api.listJobs();
         if (!cancelled) setJobs(remoteJobs);
       } catch {
@@ -5843,15 +5612,26 @@ export default function App() {
 
   const upsertJob = (job: Job) => {
     setJobs(prev => {
-      const exists = prev.some(j => j.id === job.id);
-      if (!exists) return [job, ...prev];
-      return prev.map(j => (j.id === job.id ? job : j));
+      const next = prev.some(j => j.id === job.id)
+        ? prev.map(j => (j.id === job.id ? job : j))
+        : [job, ...prev];
+      if (offlineMode || isOfflineMode()) {
+        saveLocalJobs(next);
+      }
+      return next;
     });
   };
 
   const observationSaveTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const pendingDownloadTestId = useRef<string | null>(null);
 
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'info' | 'error' } | null>(null);
+  const [takeBackConfirm, setTakeBackConfirm] = useState<{
+    jobId: string;
+    testId: string;
+    testName: string;
+    step: 1 | 2;
+  } | null>(null);
 
   useEffect(() => {
     if (toast) {
@@ -5862,54 +5642,54 @@ export default function App() {
     }
   }, [toast]);
 
-  const handleDownloadTestReport = (job: Job, test: TransformerTest) => {
-    const testData = test.observationData || {};
-    const ratingNameplateRowsHtml = renderJobRatingNameplateRows(job);
+  const serializePrintableReport = (root: HTMLElement) => {
+    // Read live control values before clone — cloneNode can drop <select> selected state.
+    const liveSelectTexts = Array.from(root.querySelectorAll('select')).map(el => {
+      const select = el as HTMLSelectElement;
+      if (!select.value) return '-';
+      const opt = select.options[select.selectedIndex];
+      return (opt?.textContent || select.value).trim() || '-';
+    });
+    const liveInputValues = Array.from(root.querySelectorAll('input, textarea')).map(el => {
+      const input = el as HTMLInputElement | HTMLTextAreaElement;
+      if (input instanceof HTMLInputElement && input.type === 'checkbox') {
+        return input.checked ? '✓' : '-';
+      }
+      return input.value || '-';
+    });
 
-    const testFormRenderedHtml = getTestFormHtml(test.name, testData, { type: job.type, capacity: job.capacity });
+    const clone = root.cloneNode(true) as HTMLElement;
+    clone.querySelectorAll('script').forEach(el => el.remove());
+    clone.querySelectorAll('button').forEach(el => el.remove());
 
-    let pdfTestedBy = testData.tested_by || 'Field Tech';
-    let pdfReviewedBy = testData.reviewed_by || 'Quality Inspector';
-    let pdfAuthorizedBy = testData.authorized_by || 'Lead Engineer';
+    clone.querySelectorAll('select').forEach((sel, i) => {
+      const select = sel as HTMLSelectElement;
+      const replacement = document.createElement('div');
+      replacement.className = select.className;
+      replacement.textContent = liveSelectTexts[i] ?? '-';
+      select.replaceWith(replacement);
+    });
 
-    let pdfTestedDate = testData.tested_at || testData.tested_date || new Date(test.updatedAt).toLocaleString();
-    let pdfReviewedDate = testData.reviewed_at || testData.reviewed_date || new Date(test.updatedAt).toLocaleString();
-    let pdfAuthorizedDate = testData.authorized_at || testData.authorized_date || new Date().toLocaleString();
+    clone.querySelectorAll('input, textarea').forEach((el, i) => {
+      const input = el as HTMLInputElement | HTMLTextAreaElement;
+      const replacement = document.createElement('div');
+      replacement.className = input.className || 'p-2 text-sm font-bold text-center';
+      if (input instanceof HTMLInputElement && input.type === 'checkbox') {
+        const checked = (liveInputValues[i] ?? '-') === '✓';
+        replacement.className = 'flex items-center justify-center';
+        replacement.innerHTML = checked
+          ? '<span style="display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border:2px solid #2563eb;border-radius:4px;background:#2563eb;color:#fff;font-weight:700;font-size:12px;line-height:1;">✓</span>'
+          : '<span style="display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border:2px solid #cbd5e1;border-radius:4px;background:#fff;"></span>';
+      } else {
+        replacement.textContent = liveInputValues[i] ?? '-';
+      }
+      input.replaceWith(replacement);
+    });
 
-    if (test.name.toUpperCase() === 'FINAL LV TEST REPORT') {
-      pdfTestedBy = testData.offered_by || 'Field Tech';
-      pdfReviewedBy = testData.tested_by || 'Quality Inspector';
-      pdfAuthorizedBy = testData.authorized_by || 'Lead Engineer';
+    return clone.innerHTML;
+  };
 
-      pdfTestedDate = testData.offered_date || pdfTestedDate;
-      pdfReviewedDate = testData.tested_date || pdfReviewedDate;
-      pdfAuthorizedDate = testData.authorized_date || pdfAuthorizedDate;
-    } else if (test.name.toUpperCase() === 'POST-CONNECTION TEST') {
-      pdfTestedBy = testData.pct_tested_by || 'Field Tech';
-      pdfReviewedBy = testData.pct_reviewed_by || 'Quality Inspector';
-      pdfAuthorizedBy = testData.pct_authorized_by || 'Lead Engineer';
-
-      pdfTestedDate = testData.pct_tested_date || pdfTestedDate;
-      pdfReviewedDate = testData.pct_reviewed_date || pdfReviewedDate;
-      pdfAuthorizedDate = testData.pct_authorized_date || pdfAuthorizedDate;
-    } else if (test.name.toUpperCase() === 'POST-TANKING TEST') {
-      pdfTestedBy = testData.pt_tested_by || 'Field Tech';
-      pdfReviewedBy = testData.pt_reviewed_by || 'Quality Inspector';
-      pdfAuthorizedBy = testData.pt_authorized_by || 'Lead Engineer';
-
-      pdfTestedDate = testData.pt_tested_date || pdfTestedDate;
-      pdfReviewedDate = testData.pt_reviewed_date || pdfReviewedDate;
-      pdfAuthorizedDate = testData.pt_authorized_date || pdfAuthorizedDate;
-    } else if (test.name.toUpperCase() === 'CHECKLIST FOR TFR BEFORE HV') {
-      pdfTestedBy = testData.tested_by || 'Field Tech';
-      pdfReviewedBy = testData.reviewed_by || 'Quality Inspector';
-      pdfAuthorizedBy = testData.authorized_by || 'Lead Engineer';
-
-      pdfTestedDate = testData.tested_date || pdfTestedDate;
-      pdfReviewedDate = testData.reviewed_date || pdfReviewedDate;
-      pdfAuthorizedDate = testData.authorized_date || pdfAuthorizedDate;
-    }
-
+  const openDownloadedReport = (job: Job, test: TransformerTest, bodyHtml: string) => {
     const htmlContent = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -5929,24 +5709,26 @@ export default function App() {
               text: '#1E293B',
               'text-muted': '#64748B',
             }
+          },
+          fontFamily: {
+            sans: ['Inter', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+            mono: ['JetBrains Mono', 'ui-monospace', 'SFMono-Regular', 'monospace'],
           }
         }
       }
     }
   </script>
   <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;700&display=swap');
-    
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;700&display=swap');
     body {
-      font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-family: 'Inter', ui-sans-serif, system-ui, sans-serif;
       margin: 0;
-      padding: 40px;
-      background-color: #f8fafc;
-      color: #0f172a;
+      padding: 24px;
+      background-color: #F8FAFC;
+      color: #1E293B;
       -webkit-print-color-adjust: exact;
       print-color-adjust: exact;
     }
-
     button.print-btn {
       display: inline-flex;
       align-items: center;
@@ -5959,16 +5741,10 @@ export default function App() {
       font-size: 14px;
       font-weight: bold;
       cursor: pointer;
-      box-shadow: 0 4px 6px -1px rgba(37, 99, 235, 0.2);
-      transition: background-color 0.2s;
     }
-
-    button.print-btn:hover {
-      background-color: #1d4ed8;
-    }
-
     .no-print {
-      margin-bottom: 30px;
+      max-width: 72rem;
+      margin: 0 auto 24px auto;
       background: white;
       padding: 16px;
       border-radius: 12px;
@@ -5977,245 +5753,30 @@ export default function App() {
       justify-content: space-between;
       align-items: center;
     }
-
-    .report-container {
-      max-width: 900px;
+    .report-sheet {
+      max-width: 72rem;
       margin: 0 auto;
-      background-color: white;
-      padding: 50px;
-      border-radius: 16px;
-      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.05);
-      border: 1px solid #e2e8f0;
+      background: #F8FAFC;
     }
-
-    .header-logo {
-      height: 70px;
-      object-fit: contain;
-      margin-bottom: 16px;
-    }
-
-    .corp-title {
-      font-size: 18px;
-      font-weight: 800;
-      letter-spacing: 0.1em;
-      text-transform: uppercase;
-      color: #0f172a;
-      margin: 0;
-    }
-
-    .corp-address {
-      font-size: 9px;
-      font-weight: 700;
-      letter-spacing: 0.2em;
-      color: #64748b;
-      margin-top: 6px;
-      margin-bottom: 24px;
-      text-transform: uppercase;
-    }
-
-    .divider {
-      height: 3px;
-      background-color: #2563eb;
-      margin-bottom: 30px;
-    }
-
-    .report-title-card {
-      background-color: #f1f5f9;
-      border-left: 5px solid #2563eb;
-      padding: 16px 20px;
-      margin-bottom: 30px;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-    }
-
-    .report-title-card h2 {
-      margin: 0;
-      font-size: 18px;
-      font-weight: 800;
-      color: #1e3a8a;
-      text-transform: uppercase;
-    }
-
-    .status-badge {
-      background-color: #d1fae5;
-      color: #065f46;
-      padding: 4px 12px;
-      border-radius: 9999px;
-      font-size: 11px;
-      font-weight: 700;
-      text-transform: uppercase;
-      border: 1px solid #a7f3d0;
-    }
-
-    .section-title {
-      font-size: 12px;
-      font-weight: 800;
-      letter-spacing: 0.1em;
-      text-transform: uppercase;
-      color: #2563eb;
-      margin-top: 30px;
-      margin-bottom: 15px;
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      border-bottom: 2px solid #e2e8f0;
-      padding-bottom: 6px;
-    }
-
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      margin-bottom: 30px;
-    }
-
-    th {
-      background-color: #f8fafc;
-      color: #475569;
-      font-weight: 700;
-      text-transform: uppercase;
-      font-size: 10px;
-      letter-spacing: 0.05em;
-      padding: 10px 14px;
-      border: 1px solid #e2e8f0;
-      text-align: left;
-    }
-
-    td {
-      padding: 10px 14px;
-      border: 1px solid #e2e8f0;
-      font-size: 12px;
-    }
-
-    .stamp-container {
-      display: grid;
-      grid-template-columns: 1fr 1fr 1fr;
-      gap: 16px;
-      margin-top: 50px;
-      border-top: 1px solid #e2e8f0;
-      padding-top: 30px;
-    }
-
-    .stamp-box {
-      background-color: #fbfbfb;
-      border: 1px dashed #cbd5e1;
-      border-radius: 8px;
-      padding: 15px;
-      text-align: center;
-    }
-
-    .stamp-box .title {
-      font-size: 9px;
-      font-weight: 800;
-      color: #475569;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-      margin-bottom: 12px;
-    }
-
-    .stamp-box .signature {
-      font-family: 'JetBrains Mono', monospace;
-      font-size: 12px;
-      font-weight: bold;
-      color: #1e40af;
-      margin-bottom: 4px;
-    }
-
-    .stamp-box .date {
-      font-size: 9px;
-      color: #94a3b8;
-    }
-
 ${PDF_PRINT_STYLES}
   </style>
 </head>
 <body>
-
-  <div class="no-print" style="max-width: 900px; margin: 0 auto 30px auto;">
+  <div class="no-print">
     <div>
-      <h4 style="margin: 0; font-size: 16px; font-weight: 700; color: #0f172a;">Print-Ready Report Connected Object</h4>
-      <p style="margin: 4px 0 0 0; font-size: 12px; color: #64748b;">Save as a premium PDF or print directly from your browser.</p>
+      <h4 style="margin: 0; font-size: 16px; font-weight: 700; color: #0f172a;">Print-Ready Report</h4>
+      <p style="margin: 4px 0 0 0; font-size: 12px; color: #64748b;">Matches on-screen UI casing and layout. Use Print → Save as PDF.</p>
     </div>
-    <button class="print-btn" onclick="window.print()">
-      <svg width="16" height="16" fill="white" viewBox="0 0 24 24" style="margin-right: 4px;"><path d="M19 8H5c-1.66 0-3 1.34-3 3v6h4v4h12v-4h4v-6c0-1.66-1.34-3-3-3zm-3 11H8v-5h8v5zm3-7c-.55 0-1-.45-1-1s.45-1 1-1 1 .45 1 1-.45 1-1 1zm-1-9H6v4h12V3z"/></svg>
-      Print Report
-    </button>
+    <button class="print-btn" onclick="window.print()">Print Report</button>
   </div>
-
-  <div class="report-container">
-    <div style="display: flex; align-items: center; justify-content: space-between; border-bottom: 2px solid #2563eb; padding-bottom: 20px; margin-bottom: 30px;">
-      <div>
-        <img src="https://apivishvaspower.com/logo.png" alt="Vishvas Logo" style="height: 60px; max-width: 240px; object-fit: contain;" />
-      </div>
-      <div style="text-align: right;">
-        <h1 style="margin: 0; font-size: 16px; font-weight: 800; color: #1e3a8a;">M/S VISHVAS POWER ENGINEERING SERVICES (P) LTD.</h1>
-        <p style="margin: 4px 0 0; font-size: 11px; color: #64748b; font-weight: 500;">
-          Plot no K5 Five Star Industrial area, MIDC, Bori, Maharashtra 441122<br/>
-          E-mail: <span style="text-decoration: underline;">testing@vishvaspower.co.in</span>
-        </p>
-      </div>
+  <div class="report-sheet">
+    <div style="margin-bottom: 24px; padding: 16px 20px; background: white; border: 1px solid #e2e8f0; border-radius: 12px;">
+      <p style="margin: 0; font-size: 10px; font-weight: 700; letter-spacing: 0.15em; text-transform: uppercase; color: #64748b;">Test Report</p>
+      <h2 style="margin: 6px 0 0 0; font-size: 22px; font-weight: 800; color: #0f172a; text-transform: uppercase; letter-spacing: 0.04em;">${test.name}</h2>
+      <p style="margin: 6px 0 0 0; font-size: 12px; font-family: 'JetBrains Mono', monospace; color: #64748b; text-transform: uppercase;">Job: ${job.name} | Protocol ID: ${test.id.slice(0, 8)}</p>
     </div>
-
-    <!-- Title Badge -->
-    <div style="background-color: #eff6ff; color: #1e40af; border: 1px solid #bfdbfe; border-radius: 8px; padding: 12px 20px; font-size: 15px; font-weight: 800; text-align: center; text-transform: uppercase; margin-bottom: 30px; letter-spacing: 0.05em;">
-      TECHNICAL TEST MEMORANDUM OF WORK - ${test.name}
-    </div>
-
-    <!-- Complete Job Rating & Nameplate -->
-    <div style="display: flex; align-items: flex-end; justify-content: space-between; border-bottom: 1px solid #cbd5e1; padding-bottom: 6px; margin: 0 0 14px;">
-      <h3 style="font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.1em; color: #2563eb; margin: 0;">JOB RATING &amp; NAMEPLATE</h3>
-      <div style="font-size: 11px; font-weight: 800; color: #1e293b;">
-        ${job.capacity} &nbsp; ${job.type.toUpperCase()} TYPE
-      </div>
-    </div>
-    <table style="width: 100%; font-size: 12px; border-collapse: collapse; margin-bottom: 30px;" border="1" cellpadding="8" cellspacing="0" bordercolor="#e2e8f0">
-      <tr>
-        <td style="font-weight: 600; color: #475569; width: 25%;">Transformer Name</td>
-        <td style="font-weight: 700; color: #0F172A; width: 25%;">${job.name}</td>
-        <td style="font-weight: 600; color: #475569; width: 25%;">Capacity</td>
-        <td style="font-weight: 700; color: #0F172A; width: 25%;">${job.capacity}</td>
-      </tr>
-      <tr>
-        <td style="font-weight: 600; color: #475569;">Transformer Type</td>
-        <td colspan="3" style="font-weight: 700; color: #0F172A;">${job.type}</td>
-      </tr>
-      ${ratingNameplateRowsHtml}
-    </table>
-
-    <div style="font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.1em; color: #2563eb; border-bottom: 1px solid #cbd5e1; padding-bottom: 6px; margin: 30px 0 20px;">
-      Test Observations & Measured Values
-    </div>
-
-    <!-- Active High-Fidelity Test Content -->
-    <div class="test-form-wrapper mb-10 text-left">
-      ${testFormRenderedHtml}
-    </div>
-
-    <!-- Signature Logs / Seal Blocks -->
-    <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 50px; page-break-inside: avoid;">
-      <div style="border: 1px solid #cbd5e1; border-radius: 8px; padding: 14px; text-align: center;">
-        <div style="font-size: 10px; font-weight: 800; text-transform: uppercase; color: #4f46e5; border-bottom: 1px solid #e1e7f0; padding-bottom: 6px; margin-bottom: 8px;">1. Done (Tested)</div>
-        <div style="font-family: monospace; font-size: 13px; font-weight: 800; color: #1e1b4b; height: 32px; display: flex; align-items: center; justify-content: center;">✓ ${pdfTestedBy}</div>
-        <div style="font-size: 9px; color: #64748b; margin-top: 4px;">${pdfTestedDate}</div>
-      </div>
-      <div style="border: 1px solid #cbd5e1; border-radius: 8px; padding: 14px; text-align: center;">
-        <div style="font-size: 10px; font-weight: 800; text-transform: uppercase; color: #0891b2; border-bottom: 1px solid #e1e7f0; padding-bottom: 6px; margin-bottom: 8px;">2. Checked (Reviewed)</div>
-        <div style="font-family: monospace; font-size: 13px; font-weight: 800; color: #164e63; height: 32px; display: flex; align-items: center; justify-content: center;">✓ ${pdfReviewedBy}</div>
-        <div style="font-size: 9px; color: #64748b; margin-top: 4px;">${pdfReviewedDate}</div>
-      </div>
-      <div style="border: 1px solid #10b981; background-color: #ecfdf5; border-radius: 8px; padding: 14px; text-align: center;">
-        <div style="font-size: 10px; font-weight: 800; text-transform: uppercase; color: #065f46; border-bottom: 1px solid #d1fae5; padding-bottom: 6px; margin-bottom: 8px;">3. Authorized (Final)</div>
-        <div style="font-family: monospace; font-size: 13px; font-weight: 800; color: #064e3b; height: 32px; display: flex; align-items: center; justify-content: center;">✓ ${pdfAuthorizedBy}</div>
-        <div style="font-size: 9px; color: #059669; margin-top: 4px;">${pdfAuthorizedDate}</div>
-      </div>
-    </div>
-
-    <p style="text-align: center; font-size: 10px; color: #94a3b8; font-family: monospace; margin-top: 40px; border-top: 1px solid #f1f5f9; padding-top: 20px;">
-      This is an official technical record generated by M/S VISHVAS POWER system under security clearance protocols.
-    </p>
-
+    ${bodyHtml}
   </div>
-
 </body>
 </html>`;
 
@@ -6228,12 +5789,52 @@ ${PDF_PRINT_STYLES}
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-    
+
     setToast({
       message: `${test.name} report downloaded!`,
       type: 'success'
     });
   };
+
+  const handleDownloadTestReport = (job: Job, test: TransformerTest) => {
+    const printable = document.getElementById('printable-test-report');
+    const printableTestId = printable?.getAttribute('data-test-id');
+
+    if (printable && printableTestId === test.id) {
+      openDownloadedReport(job, test, serializePrintableReport(printable));
+      return;
+    }
+
+    // Open the exact UI report first, then download after paint so casing/layout match
+    pendingDownloadTestId.current = test.id;
+    setSelectedJobId(job.id);
+    setEditingTestId(test.id);
+    setView('TEST_REPORT');
+    setToast({
+      message: 'Opening report UI for exact PDF download…',
+      type: 'info',
+    });
+  };
+
+  useEffect(() => {
+    if (view !== 'TEST_REPORT' || !pendingDownloadTestId.current || !editingTestId) return;
+    if (pendingDownloadTestId.current !== editingTestId) return;
+
+    const testId = pendingDownloadTestId.current;
+    const timer = window.setTimeout(() => {
+      const printable = document.getElementById('printable-test-report');
+      if (!printable || printable.getAttribute('data-test-id') !== testId) return;
+
+      const job = jobs.find(j => j.id === selectedJobId);
+      const test = job?.tests.find(t => t.id === testId);
+      if (!job || !test) return;
+
+      pendingDownloadTestId.current = null;
+      openDownloadedReport(job, test, serializePrintableReport(printable));
+    }, 150);
+
+    return () => window.clearTimeout(timer);
+  }, [view, editingTestId, selectedJobId, jobs]);
 
   const handleDownloadJobCard = (job: Job) => {
     let ratingRowsHtml = '';
@@ -6261,8 +5862,20 @@ ${PDF_PRINT_STYLES}
         badgeStyle = "background-color: #fef3c7; color: #92400e; border: 1px solid #fde68a;";
       }
 
-      const testKeysLength = Object.keys(testData).filter(k => !k.includes('_at') && !k.includes('_by')).length;
+      const testKeysLength = Object.keys(testData).filter(k => !k.includes('_at') && !k.includes('_by') && !k.includes('_date')).length;
       const filledText = testKeysLength > 0 ? `<span style="color: #059669; font-weight: 600;">Filled (${testKeysLength} values)</span>` : `<span style="color: #64748b;">No values filled</span>`;
+
+      const testedBy = getSelectedTechnician(test);
+      const reviewedBy = getSelectedReviewer(test);
+      const authorizedBy = getSelectedAuthorizer(test);
+      const signOffParts = [
+        testedBy ? `Tested: ${testedBy}` : '',
+        reviewedBy ? `Reviewed: ${reviewedBy}` : '',
+        authorizedBy ? `Auth: ${authorizedBy}` : '',
+      ].filter(Boolean);
+      const signOffHtml = signOffParts.length > 0
+        ? signOffParts.join('<br/>')
+        : '-';
 
       testsRowsHtml += `
         <tr style="border-bottom: 1px solid #e2e8f0;">
@@ -6274,10 +5887,7 @@ ${PDF_PRINT_STYLES}
           </td>
           <td style="padding: 12px 14px; font-size: 12px; color: #334155;">${filledText}</td>
           <td style="padding: 12px 14px; font-size: 11px; color: #64748b; font-family: monospace;">
-            ${testData.tested_by ? `Tested: ${testData.tested_by}` : ''}
-            ${testData.reviewed_by ? `<br/>Reviewed: ${testData.reviewed_by}` : ''}
-            ${testData.authorized_by ? `<br/>Auth: ${testData.authorized_by}` : ''}
-            ${!testData.tested_by && !testData.reviewed_by && !testData.authorized_by ? '-' : ''}
+            ${signOffHtml}
           </td>
         </tr>
       `;
@@ -6542,6 +6152,25 @@ ${PDF_PRINT_STYLES}
     setAuthError('');
   };
 
+  const completeLocalLogin = (user: { id: string; name: string; username: string; role: AuthRole; createdAt: number }) => {
+    api.setToken(null);
+    setCurrentUser(user);
+    setCurrentRole(authRoleToUserRole(user.role));
+    enableOfflineMode(true);
+    setRoleNotifications(listNotificationsForRole(user.role));
+    resetAuthForm();
+    setAuthError('');
+    setView('DASHBOARD');
+    const unread = unreadNotificationCount(user.role);
+    setToast({
+      message:
+        unread > 0
+          ? `Logged in as ${user.name} (${user.role}) — ${unread} notification${unread === 1 ? '' : 's'}`
+          : `Logged in as ${user.name} (${user.role}) — offline`,
+      type: 'success',
+    });
+  };
+
   const handleLogin = async () => {
     const username = authUsername.trim().toLowerCase();
     const password = authPassword;
@@ -6550,27 +6179,55 @@ ${PDF_PRINT_STYLES}
       return;
     }
 
+    // Prefer local accounts first so offline login doesn't spam API proxy errors
+    const localUser = loginLocalUser({ username, password, role: authRole });
+    if (localUser) {
+      const { password: _pw, ...publicUser } = localUser;
+      completeLocalLogin(publicUser);
+      return;
+    }
+
+    if (offlineMode || isOfflineMode()) {
+      setAuthError('No local account found for that role. Use Authorizer → Skip for now, or Register Staff first.');
+      return;
+    }
+
     try {
       const result = await api.login({ username, password, role: authRole });
       api.setToken(result.token);
+      setOfflineMode(false);
+      setOfflineModeState(false);
       setCurrentUser(result.user);
       setCurrentRole(result.userRole);
+      setRoleNotifications(listNotificationsForRole(result.user.role));
       const { jobs: remoteJobs } = await api.listJobs();
       setJobs(remoteJobs);
       resetAuthForm();
-      setToast({ message: `Logged in as ${result.user.name} (${result.user.role})`, type: 'success' });
+      const unread = unreadNotificationCount(result.user.role);
+      setToast({
+        message:
+          unread > 0
+            ? `Logged in as ${result.user.name} (${result.user.role}) — ${unread} notification${unread === 1 ? '' : 's'}`
+            : `Logged in as ${result.user.name} (${result.user.role})`,
+        type: 'success',
+      });
       setView('DASHBOARD');
     } catch (err) {
       const msg = err instanceof Error ? err.message : `Invalid credentials for ${authRole}.`;
       setAuthError(
-        msg === 'Failed to fetch'
-          ? 'Cannot reach API at https://vishwaspower.in/testing. Deploy the VoltTrack backend there or update VITE_API_URL.'
+        isNetworkError(err) || msg === 'Failed to fetch'
+          ? 'API offline. Use Authorizer → Skip for now, or login with a locally registered staff account.'
           : msg
       );
     }
   };
 
   const handleRegister = async () => {
+    if (!canBootstrapAuthorizer) {
+      setAuthError('Only an Authorizer can register Tester and Reviewer accounts.');
+      return;
+    }
+
     const name = authName.trim();
     const username = authUsername.trim().toLowerCase();
     const password = authPassword;
@@ -6590,13 +6247,15 @@ ${PDF_PRINT_STYLES}
     }
 
     try {
-      await api.register({ name, username, password, role: authRole });
+      await api.register({ name, username, password, role: 'Authorizer' });
+      setCanBootstrapAuthorizer(false);
       setAuthMode('login');
+      setAuthRole('Authorizer');
       setAuthPassword('');
       setAuthConfirmPassword('');
       setAuthName('');
       setAuthError('');
-      setToast({ message: `${authRole} account registered. Please login.`, type: 'success' });
+      setToast({ message: 'Authorizer account registered. Please login.', type: 'success' });
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Registration failed.';
       setAuthError(
@@ -6607,16 +6266,113 @@ ${PDF_PRINT_STYLES}
     }
   };
 
-  const handleLogout = async () => {
+  const handleSkipAuthorizerLogin = () => {
+    setCurrentUser({
+      id: 'local-skip-authorizer',
+      name: 'Authorizer (Skipped)',
+      username: 'authorizer-skip',
+      role: 'Authorizer',
+      createdAt: Date.now(),
+    });
+    setCurrentRole('Admin_Authorized');
+    setAuthError('');
+    resetAuthForm();
+    enableOfflineMode(true);
+    setRoleNotifications(listNotificationsForRole('Authorizer'));
+    setView('DASHBOARD');
+    setToast({ message: 'Offline mode: jobs save in this browser only', type: 'info' });
+  };
+
+  const finishStaffRegistration = (role: AuthRole, offline: boolean) => {
+    setStaffName('');
+    setStaffUsername('');
+    setStaffPassword('');
+    setStaffConfirmPassword('');
+    setStaffError('');
+    setToast({
+      message: offline
+        ? `${role} account registered offline. They can login with that role.`
+        : `${role} account registered.`,
+      type: 'success',
+    });
+    setView('DASHBOARD');
+  };
+
+  const handleRegisterStaff = async () => {
+    if (currentUser?.role !== 'Authorizer') {
+      setStaffError('Only an Authorizer can register Tester and Reviewer accounts.');
+      return;
+    }
+    if (!STAFF_ROLES.includes(staffRole)) {
+      setStaffError('Select Tester or Reviewer.');
+      return;
+    }
+
+    const name = staffName.trim();
+    const username = staffUsername.trim().toLowerCase();
+    const password = staffPassword;
+    const confirmPassword = staffConfirmPassword;
+
+    if (!name || !username || !password) {
+      setStaffError('Name, username, and password are required.');
+      return;
+    }
+    if (password.length < 4) {
+      setStaffError('Password must be at least 4 characters.');
+      return;
+    }
+    if (password !== confirmPassword) {
+      setStaffError('Passwords do not match.');
+      return;
+    }
+
+    if (offlineMode || isOfflineMode()) {
+      try {
+        registerLocalUser({ name, username, password, role: staffRole });
+        finishStaffRegistration(staffRole, true);
+      } catch (err) {
+        setStaffError(err instanceof Error ? err.message : 'Registration failed.');
+      }
+      return;
+    }
+
     try {
-      await api.logout();
-    } catch {
-      // ignore network logout failures
+      await api.register({ name, username, password, role: staffRole });
+      finishStaffRegistration(staffRole, false);
+    } catch (err) {
+      if (isNetworkError(err) || (err instanceof Error && /failed to fetch|request failed/i.test(err.message))) {
+        try {
+          enableOfflineMode(false);
+          registerLocalUser({ name, username, password, role: staffRole });
+          finishStaffRegistration(staffRole, true);
+          return;
+        } catch (localErr) {
+          setStaffError(localErr instanceof Error ? localErr.message : 'Registration failed.');
+          return;
+        }
+      }
+      const msg = err instanceof Error ? err.message : 'Registration failed.';
+      setStaffError(msg);
+    }
+  };
+
+  const handleLogout = async () => {
+    // Skip remote logout when offline to avoid noisy proxy errors
+    if (!offlineMode && !isOfflineMode() && api.getToken()) {
+      try {
+        await api.logout();
+      } catch {
+        // ignore network logout failures
+      }
     }
     api.setToken(null);
+    setOfflineMode(false);
+    setOfflineModeState(false);
     setCurrentUser(null);
     setCurrentRole('Admin_Tested');
     setJobs([]);
+    setRoleNotifications([]);
+    setNotificationsOpen(false);
     resetAuthForm();
     setAuthMode('login');
     setView('LOGIN');
@@ -6631,18 +6387,55 @@ ${PDF_PRINT_STYLES}
 
   const handleSelectCapacity = (capacity: TransformerCapacity) => {
     setCurrentSelection(prev => ({ ...prev, capacity }));
-    // Auto-pre-populate job name as example
-    const randNum = Math.floor(1000 + Math.random() * 9000);
-    setJobName(`V/M/${randNum}`);
+    setJobName('V/M/');
     setView('NAME_JOB');
   };
 
   const handleSaveJob = async () => {
-    if (!jobName.trim() || !currentSelection.type || !currentSelection.capacity) return;
+    const normalizedName = jobName.trim().startsWith('V/M/')
+      ? jobName.trim()
+      : `V/M/${jobName.trim().replace(/^V\/M\/?/i, '')}`;
+    if (!normalizedName || normalizedName === 'V/M/' || !currentSelection.type || !currentSelection.capacity) return;
+
+    const finishCreatedJob = (job: Job) => {
+      let nextJob = job;
+      if (job.type === 'Auto' && (job.capacity === '12.3MVA' || job.capacity === '16.5MVA')) {
+        const ctTest = job.tests.find(t => t.name === 'CT TEST');
+        if (ctTest) {
+          const seeded = seedCTNameplateDefaults({}, job.type, job.capacity);
+          if (offlineMode || isOfflineMode()) {
+            const updated = updateLocalObservation(job.id, ctTest.id, seeded);
+            if (updated) nextJob = updated.job;
+          } else {
+            nextJob = { ...job, tests: job.tests.map(t => (t.id === ctTest.id ? { ...t, observationData: seeded } : t)) };
+          }
+        }
+      }
+      upsertJob(nextJob);
+      setView('JOB_LIST');
+      setCurrentSelection({});
+      setJobName('');
+      setToast({
+        message: offlineMode || isOfflineMode()
+          ? `Job ${nextJob.name} created (offline)`
+          : `Job ${nextJob.name} created`,
+        type: 'success',
+      });
+    };
+
+    if (offlineMode || isOfflineMode()) {
+      const job = createLocalJob({
+        name: normalizedName,
+        type: currentSelection.type,
+        capacity: currentSelection.capacity,
+      });
+      finishCreatedJob(job);
+      return;
+    }
 
     try {
       const { job } = await api.createJob({
-        name: jobName.trim(),
+        name: normalizedName,
         type: currentSelection.type,
         capacity: currentSelection.capacity,
       });
@@ -6665,6 +6458,16 @@ ${PDF_PRINT_STYLES}
       setJobName('');
       setToast({ message: `Job ${job.name} created`, type: 'success' });
     } catch (err) {
+      if (isNetworkError(err)) {
+        enableOfflineMode(false);
+        const job = createLocalJob({
+          name: normalizedName,
+          type: currentSelection.type!,
+          capacity: currentSelection.capacity!,
+        });
+        finishCreatedJob(job);
+        return;
+      }
       setToast({
         message: err instanceof Error ? err.message : 'Failed to create job',
         type: 'error',
@@ -6672,26 +6475,143 @@ ${PDF_PRINT_STYLES}
     }
   };
 
-  const handleUpdateTestStage = async (jobId: string, testId: string, targetStage: TestStage) => {
+  const handleUpdateTestStage = async (jobId: string, testId: string, targetStage: TestStage): Promise<boolean> => {
+    const job = jobs.find(j => j.id === jobId);
+    const test = job?.tests.find(t => t.id === testId);
+    if (test && targetStage === 'Reviewed' && test.stage === 'Tested' && !getSelectedTechnician(test)) {
+      setToast({
+        message: 'Select Technician is mandatory before submitting to Reviewer.',
+        type: 'error',
+      });
+      return false;
+    }
+    if (test && targetStage === 'Authorized' && test.stage === 'Reviewed' && !getSelectedReviewer(test)) {
+      setToast({
+        message: 'Select Reviewer is mandatory before submitting to Authorizer.',
+        type: 'error',
+      });
+      return false;
+    }
+
+    const emitStageNotifications = (updatedJob: Job) => {
+      const updatedTest = updatedJob.tests.find(t => t.id === testId);
+      if (!updatedTest) return;
+      const actor = currentUser?.name || currentAuthRole;
+
+      if (targetStage === 'Tested') {
+        notifyRole(
+          'Reviewer',
+          'Job submitted',
+          `${actor} submitted "${updatedTest.name}" for review on job ${updatedJob.name}.`,
+          { jobId: updatedJob.id, testId: updatedTest.id },
+          false
+        );
+        if (currentAuthRole === 'Reviewer') {
+          setToast({ message: `New submission: ${updatedTest.name} on ${updatedJob.name}`, type: 'info' });
+        } else {
+          setToast({ message: `Submitted "${updatedTest.name}" to Reviewer`, type: 'success' });
+        }
+      }
+
+      if (targetStage === 'Reviewed') {
+        notifyRole(
+          'Reviewer',
+          'Job submitted',
+          `${actor} submitted "${updatedTest.name}" for review on job ${updatedJob.name}.`,
+          { jobId: updatedJob.id, testId: updatedTest.id },
+          false
+        );
+        notifyRole(
+          'Authorizer',
+          'Ready for authorization',
+          `"${updatedTest.name}" on job ${updatedJob.name} is reviewed and waiting for authorization.`,
+          { jobId: updatedJob.id, testId: updatedTest.id },
+          false
+        );
+        if (currentAuthRole === 'Reviewer') {
+          setToast({ message: `Submission received: ${updatedTest.name}`, type: 'info' });
+        } else if (currentAuthRole === 'Authorizer') {
+          setToast({ message: `Ready to authorize: ${updatedTest.name}`, type: 'info' });
+        } else {
+          setToast({ message: `Submitted "${updatedTest.name}" to Reviewer`, type: 'success' });
+        }
+      }
+
+      if (targetStage === 'Authorized') {
+        notifyRole(
+          'Authorizer',
+          'Authorization update',
+          `"${updatedTest.name}" on job ${updatedJob.name} was marked Authorized by ${actor}.`,
+          { jobId: updatedJob.id, testId: updatedTest.id },
+          false
+        );
+        if (currentAuthRole === 'Authorizer') {
+          setToast({ message: `Authorized: ${updatedTest.name}`, type: 'success' });
+        }
+      }
+    };
+
+    if (offlineMode || isOfflineMode()) {
+      const result = updateLocalStage(jobId, testId, targetStage, 'promote');
+      if (!result) {
+        setToast({ message: 'Job or test not found', type: 'error' });
+        return false;
+      }
+      upsertJob(result.job);
+      emitStageNotifications(result.job);
+      if (result.openTestId) {
+        setEditingTestId(result.openTestId);
+        setView('TEST_REPORT');
+      }
+      return true;
+    }
+
     try {
-      const { job, openTestId } = await api.updateStage(jobId, testId, {
+      const { job: updatedJob, openTestId } = await api.updateStage(jobId, testId, {
         stage: targetStage,
         action: 'promote',
       });
-      upsertJob(job);
+      upsertJob(updatedJob);
+      emitStageNotifications(updatedJob);
       if (openTestId) {
         setEditingTestId(openTestId);
         setView('TEST_REPORT');
       }
+      return true;
     } catch (err) {
+      if (isNetworkError(err)) {
+        enableOfflineMode(false);
+        const result = updateLocalStage(jobId, testId, targetStage, 'promote');
+        if (result) {
+          upsertJob(result.job);
+          emitStageNotifications(result.job);
+          if (result.openTestId) {
+            setEditingTestId(result.openTestId);
+            setView('TEST_REPORT');
+          }
+          return true;
+        }
+      }
       setToast({
         message: err instanceof Error ? err.message : 'Stage update failed',
         type: 'error',
       });
+      return false;
     }
   };
 
   const handleRejectTestStage = async (jobId: string, testId: string, targetStage: TestStage) => {
+    if (offlineMode || isOfflineMode()) {
+      const result = updateLocalStage(jobId, testId, targetStage, 'reject');
+      if (!result) {
+        setToast({ message: 'Job or test not found', type: 'error' });
+        return;
+      }
+      upsertJob(result.job);
+      setToast({ message: `Rejected to ${targetStage}`, type: 'info' });
+      return;
+    }
+
     try {
       const { job } = await api.updateStage(jobId, testId, {
         stage: targetStage,
@@ -6708,10 +6628,41 @@ ${PDF_PRINT_STYLES}
   };
 
   const handleAcceptTestOffer = async (jobId: string, testId: string) => {
+    const sourceJob = jobs.find(j => j.id === jobId);
+    const sourceTest = sourceJob?.tests.find(t => t.id === testId);
+    const afterAccept = (job: Job) => {
+      upsertJob(job);
+      const test = job.tests.find(t => t.id === testId) || sourceTest;
+      const reviewerName = currentUser?.name || 'Reviewer';
+      notifyRole(
+        'Tester',
+        'Offer accepted',
+        `${reviewerName} accepted "${test?.name || 'test'}" on job ${job.name}.`,
+        { jobId: job.id, testId },
+        false
+      );
+      setToast({
+        message: `Accepted "${test?.name || 'test'}". Tester has been notified.`,
+        type: 'success',
+      });
+    };
+
+    if (offlineMode || isOfflineMode()) {
+      const job = acceptLocalTest(jobId, testId);
+      if (job) afterAccept(job);
+      return;
+    }
+
     try {
       const { job } = await api.acceptTest(jobId, testId);
-      upsertJob(job);
+      afterAccept(job);
     } catch (err) {
+      if (isNetworkError(err)) {
+        enableOfflineMode(false);
+        const job = acceptLocalTest(jobId, testId);
+        if (job) afterAccept(job);
+        return;
+      }
       setToast({
         message: err instanceof Error ? err.message : 'Accept failed',
         type: 'error',
@@ -6719,20 +6670,165 @@ ${PDF_PRINT_STYLES}
     }
   };
 
+  const openTakeBackConfirm = (jobId: string, testId: string) => {
+    const sourceJob = jobs.find(j => j.id === jobId);
+    const sourceTest = sourceJob?.tests.find(t => t.id === testId);
+    setTakeBackConfirm({
+      jobId,
+      testId,
+      testName: sourceTest?.name || 'this test',
+      step: 1,
+    });
+  };
+
+  const executeTakeBackOffer = async (jobId: string, testId: string, testName: string) => {
+    setTakeBackConfirm(null);
+
+    const afterUnaccept = (job: Job) => {
+      upsertJob(job);
+      const reviewerName = currentUser?.name || 'Reviewer';
+      notifyRole(
+        'Tester',
+        'Offer taken back',
+        `${reviewerName} took back the offer for "${testName}" on job ${job.name}.`,
+        { jobId: job.id, testId },
+        false
+      );
+      setToast({
+        message: `Offer for "${testName}" taken back.`,
+        type: 'info',
+      });
+    };
+
+    if (offlineMode || isOfflineMode()) {
+      const job = unacceptLocalTest(jobId, testId);
+      if (!job) {
+        setToast({
+          message: 'Cannot take back offer after testing has started.',
+          type: 'error',
+        });
+        return;
+      }
+      afterUnaccept(job);
+      return;
+    }
+
+    try {
+      const { job } = await api.unacceptTest(jobId, testId);
+      afterUnaccept(job);
+    } catch (err) {
+      if (isNetworkError(err)) {
+        enableOfflineMode(false);
+        const job = unacceptLocalTest(jobId, testId);
+        if (!job) {
+          setToast({
+            message: 'Cannot take back offer after testing has started.',
+            type: 'error',
+          });
+          return;
+        }
+        afterUnaccept(job);
+        return;
+      }
+      setToast({
+        message: err instanceof Error ? err.message : 'Failed to take back offer',
+        type: 'error',
+      });
+    }
+  };
+
+  const openDeleteJobConfirm = (jobId: string) => {
+    const job = jobs.find(j => j.id === jobId);
+    if (!job) return;
+    setDeleteJobConfirm({ jobId: job.id, jobName: job.name, step: 1 });
+  };
+
+  const executeDeleteJob = async (jobId: string, jobName: string) => {
+    setDeleteJobConfirm(null);
+
+    const afterDelete = () => {
+      setJobs(prev => prev.filter(j => j.id !== jobId));
+      if (selectedJobId === jobId) {
+        setSelectedJobId(null);
+        setEditingTestId(null);
+        setView('JOB_LIST');
+      }
+      setToast({
+        message: `Job "${jobName}" deleted.`,
+        type: 'info',
+      });
+    };
+
+    if (offlineMode || isOfflineMode()) {
+      if (!deleteLocalJob(jobId)) {
+        setToast({ message: 'Job not found', type: 'error' });
+        return;
+      }
+      afterDelete();
+      return;
+    }
+
+    try {
+      await api.deleteJob(jobId);
+      deleteLocalJob(jobId);
+      afterDelete();
+    } catch (err) {
+      if (isNetworkError(err)) {
+        enableOfflineMode(false);
+        if (!deleteLocalJob(jobId)) {
+          setToast({ message: 'Job not found', type: 'error' });
+          return;
+        }
+        afterDelete();
+        return;
+      }
+      setToast({
+        message: err instanceof Error ? err.message : 'Failed to delete job',
+        type: 'error',
+      });
+    }
+  };
+
   const handleAcceptAllOffers = async (jobId: string) => {
+    const sourceJob = jobs.find(j => j.id === jobId);
+    const afterAcceptAll = (job: Job) => {
+      upsertJob(job);
+      const reviewerName = currentUser?.name || 'Reviewer';
+      notifyRole(
+        'Tester',
+        'Offers accepted',
+        `${reviewerName} accepted all pending offers on job ${job.name}.`,
+        { jobId: job.id },
+        false
+      );
+      setToast({
+        message: `All pending offers accepted. Tester has been notified.`,
+        type: 'success',
+      });
+    };
+
+    if (offlineMode || isOfflineMode()) {
+      const job = acceptAllLocalTests(jobId);
+      if (job) afterAcceptAll(job);
+      return;
+    }
+
     try {
       const { job } = await api.acceptAllTests(jobId);
-      upsertJob(job);
-      setToast({ message: 'All pending offers accepted', type: 'success' });
+      afterAcceptAll(job);
     } catch (err) {
+      if (isNetworkError(err)) {
+        enableOfflineMode(false);
+        const job = acceptAllLocalTests(jobId);
+        if (job) afterAcceptAll(job);
+        return;
+      }
       setToast({
         message: err instanceof Error ? err.message : 'Accept all failed',
         type: 'error',
       });
     }
   };
-
-  const [editingTestId, setEditingTestId] = useState<string | null>(null);
 
   const handleUpdateTestData = async (jobId: string, testId: string, data: Record<string, string>) => {
     setJobs(prev => prev.map(job => {
@@ -6752,10 +6848,21 @@ ${PDF_PRINT_STYLES}
       clearTimeout(observationSaveTimers.current[key]);
     }
     observationSaveTimers.current[key] = setTimeout(async () => {
+      if (offlineMode || isOfflineMode()) {
+        const updated = updateLocalObservation(jobId, testId, data);
+        if (updated) upsertJob(updated.job);
+        return;
+      }
       try {
         const { job } = await api.updateObservation(jobId, testId, data);
         upsertJob(job);
       } catch (err) {
+        if (isNetworkError(err)) {
+          enableOfflineMode(false);
+          const updated = updateLocalObservation(jobId, testId, data);
+          if (updated) upsertJob(updated.job);
+          return;
+        }
         setToast({
           message: err instanceof Error ? err.message : 'Failed to save observations',
           type: 'error',
@@ -6765,12 +6872,26 @@ ${PDF_PRINT_STYLES}
   };
 
   const handleUpdateJobRating = async (jobId: string, data: Record<string, string>) => {
-    setJobs(prev => prev.map(job => (job.id === jobId ? { ...job, ratingData: data } : job)));
+    setJobs(prev => {
+      const next = prev.map(job => (job.id === jobId ? { ...job, ratingData: data } : job));
+      if (offlineMode || isOfflineMode()) saveLocalJobs(next);
+      return next;
+    });
+
+    if (offlineMode || isOfflineMode()) {
+      updateLocalRating(jobId, data);
+      return;
+    }
 
     try {
       const { job } = await api.updateRating(jobId, data);
       upsertJob(job);
     } catch (err) {
+      if (isNetworkError(err)) {
+        enableOfflineMode(false);
+        updateLocalRating(jobId, data);
+        return;
+      }
       setToast({
         message: err instanceof Error ? err.message : 'Failed to save rating',
         type: 'error',
@@ -6797,7 +6918,7 @@ ${PDF_PRINT_STYLES}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: -20, scale: 0.95 }}
             onClick={() => setToast(null)}
-            className={`fixed top-16 right-6 z-50 flex items-center gap-2.5 px-4.5 py-3 rounded-xl border shadow-xl cursor-pointer ${
+            className={`fixed top-[50px] right-6 z-[60] flex items-center gap-2.5 px-4.5 py-3 rounded-xl border shadow-xl cursor-pointer max-w-sm ${
               toast.type === 'success' 
                 ? 'bg-emerald-50 text-emerald-800 border-emerald-200 shadow-emerald-200/10' 
                 : toast.type === 'error'
@@ -6817,6 +6938,126 @@ ${PDF_PRINT_STYLES}
         )}
       </AnimatePresence>
 
+      <AnimatePresence>
+        {takeBackConfirm && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[70] flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm"
+            onClick={() => setTakeBackConfirm(null)}
+          >
+            <motion.div
+              initial={{ opacity: 0, y: 12, scale: 0.96 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 12, scale: 0.96 }}
+              onClick={(e) => e.stopPropagation()}
+              className="w-full max-w-md rounded-2xl border border-industrial-border bg-white shadow-2xl p-6 space-y-4"
+            >
+              <div className="flex items-start gap-3">
+                <div className="mt-0.5 rounded-full bg-rose-50 p-2 text-rose-600">
+                  <AlertCircle size={20} />
+                </div>
+                <div className="space-y-1">
+                  <h3 className="text-base font-bold text-industrial-text">
+                    {takeBackConfirm.step === 1 ? 'Take back offer?' : 'Confirm again'}
+                  </h3>
+                  <p className="text-sm text-industrial-text-muted leading-relaxed">
+                    {takeBackConfirm.step === 1
+                      ? `Take back the accepted offer for "${takeBackConfirm.testName}"? It will return to Available Test Offers.`
+                      : `Please confirm again. Are you sure you want to take back the offer for "${takeBackConfirm.testName}"?`}
+                  </p>
+                </div>
+              </div>
+              <div className="flex justify-end gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setTakeBackConfirm(null)}
+                  className="px-4 py-2 rounded-xl text-xs font-bold uppercase tracking-wider text-industrial-text-muted hover:bg-slate-100 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (takeBackConfirm.step === 1) {
+                      setTakeBackConfirm({ ...takeBackConfirm, step: 2 });
+                      return;
+                    }
+                    void executeTakeBackOffer(
+                      takeBackConfirm.jobId,
+                      takeBackConfirm.testId,
+                      takeBackConfirm.testName
+                    );
+                  }}
+                  className="px-4 py-2 rounded-xl text-xs font-bold uppercase tracking-wider bg-rose-600 hover:bg-rose-700 text-white shadow-md shadow-rose-600/20 transition-colors"
+                >
+                  {takeBackConfirm.step === 1 ? 'Take Back' : 'Yes, Take Back'}
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {deleteJobConfirm && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[70] flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm"
+            onClick={() => setDeleteJobConfirm(null)}
+          >
+            <motion.div
+              initial={{ opacity: 0, y: 12, scale: 0.96 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 12, scale: 0.96 }}
+              onClick={(e) => e.stopPropagation()}
+              className="w-full max-w-md rounded-2xl border border-industrial-border bg-white shadow-2xl p-6 space-y-4"
+            >
+              <div className="flex items-start gap-3">
+                <div className="mt-0.5 rounded-full bg-rose-50 p-2 text-rose-600">
+                  <Trash2 size={20} />
+                </div>
+                <div className="space-y-1">
+                  <h3 className="text-base font-bold text-industrial-text">
+                    {deleteJobConfirm.step === 1 ? 'Delete job?' : 'Confirm again'}
+                  </h3>
+                  <p className="text-sm text-industrial-text-muted leading-relaxed">
+                    {deleteJobConfirm.step === 1
+                      ? `Are you sure you want to delete "${deleteJobConfirm.jobName}"? This permanently removes the job and all of its test records.`
+                      : `Please confirm again. Delete "${deleteJobConfirm.jobName}" permanently? This cannot be undone.`}
+                  </p>
+                </div>
+              </div>
+              <div className="flex justify-end gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setDeleteJobConfirm(null)}
+                  className="px-4 py-2 rounded-xl text-xs font-bold uppercase tracking-wider text-industrial-text-muted hover:bg-slate-100 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (deleteJobConfirm.step === 1) {
+                      setDeleteJobConfirm({ ...deleteJobConfirm, step: 2 });
+                      return;
+                    }
+                    void executeDeleteJob(deleteJobConfirm.jobId, deleteJobConfirm.jobName);
+                  }}
+                  className="px-4 py-2 rounded-xl text-xs font-bold uppercase tracking-wider bg-rose-600 hover:bg-rose-700 text-white shadow-md shadow-rose-600/20 transition-colors"
+                >
+                  {deleteJobConfirm.step === 1 ? 'Delete Job' : 'Yes, Delete'}
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {view !== 'LOGIN' && (
         <div className="fixed top-0 left-0 right-0 z-50 bg-white/80 backdrop-blur-md border-b border-industrial-border px-6 py-2 flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -6828,6 +7069,73 @@ ${PDF_PRINT_STYLES}
             />
           </div>
           <div className="flex items-center gap-3">
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => {
+                  setNotificationsOpen(open => !open);
+                  refreshNotifications();
+                }}
+                className="relative p-2 rounded-lg border border-industrial-border bg-white hover:border-industrial-accent/40 transition-colors"
+                title="Notifications"
+              >
+                <Bell size={16} className="text-industrial-text-muted" />
+                {roleNotifications.some(n => !n.read) && (
+                  <span className="absolute -top-1 -right-1 min-w-[16px] h-4 px-1 rounded-full bg-rose-500 text-white text-[9px] font-bold flex items-center justify-center">
+                    {roleNotifications.filter(n => !n.read).length}
+                  </span>
+                )}
+              </button>
+              {notificationsOpen && (
+                <div className="absolute right-0 top-full mt-3 w-80 max-h-96 overflow-auto bg-white border border-industrial-border rounded-xl shadow-xl z-[70]">
+                  <div className="sticky top-0 bg-white border-b border-industrial-border px-3 py-2 flex items-center justify-between">
+                    <p className="text-[11px] font-bold uppercase tracking-wider text-industrial-text">
+                      {currentAuthRole} Notifications
+                    </p>
+                    <button
+                      type="button"
+                      className="text-[10px] font-bold uppercase text-industrial-accent hover:underline"
+                      onClick={() => {
+                        markAllNotificationsRead(currentAuthRole);
+                        refreshNotifications(currentAuthRole);
+                      }}
+                    >
+                      Mark all read
+                    </button>
+                  </div>
+                  {roleNotifications.length === 0 ? (
+                    <p className="p-4 text-xs text-industrial-text-muted">No notifications yet.</p>
+                  ) : (
+                    <div className="divide-y divide-industrial-border">
+                      {roleNotifications.map(n => (
+                        <button
+                          key={n.id}
+                          type="button"
+                          className={`w-full text-left px-3 py-3 hover:bg-industrial-bg/80 transition-colors ${
+                            n.read ? 'opacity-70' : 'bg-blue-50/40'
+                          }`}
+                          onClick={() => {
+                            markNotificationRead(n.id);
+                            refreshNotifications(currentAuthRole);
+                            if (n.jobId) {
+                              setSelectedJobId(n.jobId);
+                              setView('JOB_DETAIL');
+                              setNotificationsOpen(false);
+                            }
+                          }}
+                        >
+                          <p className="text-[11px] font-bold text-industrial-text">{n.title}</p>
+                          <p className="text-[11px] text-industrial-text-muted mt-0.5 leading-snug">{n.message}</p>
+                          <p className="text-[9px] font-mono text-industrial-text-muted mt-1">
+                            {new Date(n.createdAt).toLocaleString()}
+                          </p>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
             <div className="text-right">
               <p className="text-[11px] font-bold text-industrial-text">
                 {currentUser?.name || 'Guest'}
@@ -6868,51 +7176,72 @@ ${PDF_PRINT_STYLES}
               />
             </div>
 
-            <div className="grid grid-cols-2 gap-2 mb-6 p-1 bg-industrial-bg rounded-xl border border-industrial-border">
-              <button
-                type="button"
-                onClick={() => { setAuthMode('login'); setAuthError(''); }}
-                className={`py-2 rounded-lg text-xs font-bold uppercase tracking-wider transition-all ${
-                  authMode === 'login'
-                    ? 'bg-industrial-accent text-white shadow-sm'
-                    : 'text-industrial-text-muted hover:text-industrial-text'
-                }`}
-              >
-                Login
-              </button>
-              <button
-                type="button"
-                onClick={() => { setAuthMode('register'); setAuthError(''); }}
-                className={`py-2 rounded-lg text-xs font-bold uppercase tracking-wider transition-all ${
-                  authMode === 'register'
-                    ? 'bg-industrial-accent text-white shadow-sm'
-                    : 'text-industrial-text-muted hover:text-industrial-text'
-                }`}
-              >
-                Register
-              </button>
-            </div>
+            {canBootstrapAuthorizer ? (
+              <div className="grid grid-cols-2 gap-2 mb-6 p-1 bg-industrial-bg rounded-xl border border-industrial-border">
+                <button
+                  type="button"
+                  onClick={() => { setAuthMode('login'); setAuthError(''); }}
+                  className={`py-2 rounded-lg text-xs font-bold uppercase tracking-wider transition-all ${
+                    authMode === 'login'
+                      ? 'bg-industrial-accent text-white shadow-sm'
+                      : 'text-industrial-text-muted hover:text-industrial-text'
+                  }`}
+                >
+                  Login
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAuthMode('register');
+                    setAuthRole('Authorizer');
+                    setAuthError('');
+                  }}
+                  className={`py-2 rounded-lg text-xs font-bold uppercase tracking-wider transition-all ${
+                    authMode === 'register'
+                      ? 'bg-industrial-accent text-white shadow-sm'
+                      : 'text-industrial-text-muted hover:text-industrial-text'
+                  }`}
+                >
+                  Register
+                </button>
+              </div>
+            ) : (
+              <div className="mb-6 rounded-xl border border-industrial-border bg-industrial-bg px-4 py-3">
+                <p className="text-[11px] font-bold uppercase tracking-wider text-industrial-text-muted">
+                  Staff accounts
+                </p>
+                <p className="mt-1 text-xs text-industrial-text-muted">
+                  Only an Authorizer can register Tester and Reviewer accounts after login.
+                </p>
+              </div>
+            )}
 
             <div className="mb-5">
               <label className="block text-xs font-mono uppercase text-industrial-text-muted mb-2 ml-1">
-                Login As
+                {authMode === 'register' ? 'Register As' : 'Login As'}
               </label>
-              <div className="grid grid-cols-3 gap-2">
-                {AUTH_ROLES.map(role => (
-                  <button
-                    key={role}
-                    type="button"
-                    onClick={() => setAuthRole(role)}
-                    className={`py-2.5 rounded-lg text-[10px] font-bold uppercase tracking-wide border transition-all ${
-                      authRole === role
-                        ? 'bg-industrial-accent/10 border-industrial-accent text-industrial-accent'
-                        : 'bg-industrial-bg border-industrial-border text-industrial-text-muted hover:border-industrial-accent/40'
-                    }`}
-                  >
-                    {role}
-                  </button>
-                ))}
-              </div>
+              {authMode === 'register' ? (
+                <div className="py-2.5 rounded-lg text-[10px] font-bold uppercase tracking-wide border bg-industrial-accent/10 border-industrial-accent text-industrial-accent text-center">
+                  Authorizer (first account)
+                </div>
+              ) : (
+                <div className="grid grid-cols-3 gap-2">
+                  {AUTH_ROLES.map(role => (
+                    <button
+                      key={role}
+                      type="button"
+                      onClick={() => setAuthRole(role)}
+                      className={`py-2.5 rounded-lg text-[10px] font-bold uppercase tracking-wide border transition-all ${
+                        authRole === role
+                          ? 'bg-industrial-accent/10 border-industrial-accent text-industrial-accent'
+                          : 'bg-industrial-bg border-industrial-border text-industrial-text-muted hover:border-industrial-accent/40'
+                      }`}
+                    >
+                      {role}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
             
             <div className="space-y-4">
@@ -6979,13 +7308,141 @@ ${PDF_PRINT_STYLES}
                 {authMode === 'login' ? (
                   <>Login as {authRole} <ArrowRight size={18} /></>
                 ) : (
-                  <>Register {authRole} <ArrowRight size={18} /></>
+                  <>Register Authorizer <ArrowRight size={18} /></>
                 )}
               </button>
+
+              {authMode === 'login' && authRole === 'Authorizer' && (
+                <button
+                  type="button"
+                  onClick={handleSkipAuthorizerLogin}
+                  className="w-full mt-2 py-3 rounded-lg border border-industrial-border text-industrial-text-muted hover:text-industrial-text hover:border-industrial-accent/40 text-sm font-medium transition-all"
+                >
+                  Skip for now
+                </button>
+              )}
             </div>
             <p className="mt-8 text-center text-sm text-industrial-text-muted">
               Secure Data Management for Testing Department
             </p>
+          </motion.div>
+        )}
+
+        {view === 'REGISTER_STAFF' && currentUser?.role === 'Authorizer' && (
+          <motion.div
+            key="register-staff"
+            variants={containerVariants}
+            initial="hidden"
+            animate="visible"
+            exit="exit"
+            className="w-full max-w-md bg-industrial-card border border-industrial-border p-8 rounded-2xl shadow-2xl"
+          >
+            <button
+              type="button"
+              onClick={() => setView('DASHBOARD')}
+              className="mb-6 flex items-center gap-2 text-sm text-industrial-text-muted hover:text-industrial-text transition-colors"
+            >
+              <ArrowLeft size={16} /> Back to Dashboard
+            </button>
+            <div className="flex items-center gap-3 mb-6">
+              <div className="p-2 bg-industrial-accent/10 rounded-lg">
+                <UserPlus className="text-industrial-accent" size={20} />
+              </div>
+              <div>
+                <h2 className="text-xl font-medium">Register Staff</h2>
+                <p className="text-xs text-industrial-text-muted">Authorizer-only: create Tester or Reviewer</p>
+              </div>
+            </div>
+
+            <div className="mb-5">
+              <label className="block text-xs font-mono uppercase text-industrial-text-muted mb-2 ml-1">
+                Role
+              </label>
+              <div className="grid grid-cols-2 gap-2">
+                {STAFF_ROLES.map(role => (
+                  <button
+                    key={role}
+                    type="button"
+                    onClick={() => setStaffRole(role)}
+                    className={`py-2.5 rounded-lg text-[10px] font-bold uppercase tracking-wide border transition-all ${
+                      staffRole === role
+                        ? 'bg-industrial-accent/10 border-industrial-accent text-industrial-accent'
+                        : 'bg-industrial-bg border-industrial-border text-industrial-text-muted hover:border-industrial-accent/40'
+                    }`}
+                  >
+                    {role}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="space-y-4">
+              <div>
+                <label className="block text-xs font-mono uppercase text-industrial-text-muted mb-1.5 ml-1">Full Name</label>
+                <input
+                  type="text"
+                  value={staffName}
+                  onChange={(e) => setStaffName(e.target.value)}
+                  placeholder="Enter full name"
+                  className="w-full bg-industrial-bg border border-industrial-border rounded-lg px-4 py-3 focus:outline-none focus:border-industrial-accent transition-colors font-mono text-sm"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-mono uppercase text-industrial-text-muted mb-1.5 ml-1">Username</label>
+                <input
+                  type="text"
+                  value={staffUsername}
+                  onChange={(e) => setStaffUsername(e.target.value)}
+                  placeholder="Enter username"
+                  className="w-full bg-industrial-bg border border-industrial-border rounded-lg px-4 py-3 focus:outline-none focus:border-industrial-accent transition-colors font-mono text-sm"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-mono uppercase text-industrial-text-muted mb-1.5 ml-1">Password</label>
+                <input
+                  type="password"
+                  value={staffPassword}
+                  onChange={(e) => setStaffPassword(e.target.value)}
+                  placeholder="Enter password"
+                  className="w-full bg-industrial-bg border border-industrial-border rounded-lg px-4 py-3 focus:outline-none focus:border-industrial-accent transition-colors font-mono text-sm"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-mono uppercase text-industrial-text-muted mb-1.5 ml-1">Confirm Password</label>
+                <input
+                  type="password"
+                  value={staffConfirmPassword}
+                  onChange={(e) => setStaffConfirmPassword(e.target.value)}
+                  placeholder="Re-enter password"
+                  className="w-full bg-industrial-bg border border-industrial-border rounded-lg px-4 py-3 focus:outline-none focus:border-industrial-accent transition-colors font-mono text-sm"
+                />
+              </div>
+
+              {staffError && (
+                <p className="text-xs font-bold text-red-600 bg-red-50 border border-red-100 rounded-lg px-3 py-2">
+                  {staffError}
+                </p>
+              )}
+
+              <button
+                type="button"
+                onClick={handleRegisterStaff}
+                className="w-full bg-industrial-accent hover:bg-blue-700 text-white font-medium py-3 rounded-lg flex items-center justify-center gap-2 transition-all mt-2 shadow-sm"
+              >
+                Register {staffRole} <ArrowRight size={18} />
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setStaffError('');
+                  setView('DASHBOARD');
+                  setToast({ message: 'Skipped staff registration for now', type: 'info' });
+                }}
+                className="w-full mt-2 py-3 rounded-lg border border-industrial-border text-industrial-text-muted hover:text-industrial-text hover:border-industrial-accent/40 text-sm font-medium transition-all"
+              >
+                Skip for now
+              </button>
+            </div>
           </motion.div>
         )}
 
@@ -7014,7 +7471,7 @@ ${PDF_PRINT_STYLES}
               </button>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-12">
+            <div className={`grid grid-cols-1 gap-4 mb-12 ${currentUser?.role === 'Authorizer' ? 'md:grid-cols-3' : 'md:grid-cols-2'}`}>
               <button 
                 id="transformer-module-btn"
                 onClick={handleStartWorkflow}
@@ -7032,6 +7489,27 @@ ${PDF_PRINT_STYLES}
                   Start New Job <ChevronRight size={16} className="group-hover:translate-x-1 transition-transform" />
                 </div>
               </button>
+
+              {currentUser?.role === 'Authorizer' && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setStaffError('');
+                    setStaffRole('Tester');
+                    setView('REGISTER_STAFF');
+                  }}
+                  className="group relative bg-industrial-card border border-industrial-border p-8 rounded-2xl hover:border-industrial-accent transition-all text-left overflow-hidden"
+                >
+                  <div className="p-3 bg-industrial-accent/10 rounded-xl w-fit mb-4">
+                    <UserPlus className="text-industrial-accent" size={24} />
+                  </div>
+                  <h3 className="text-lg font-medium mb-1">Register Staff</h3>
+                  <p className="text-sm text-industrial-text-muted">Create Tester or Reviewer accounts</p>
+                  <div className="mt-6 flex items-center gap-2 text-industrial-accent font-medium text-sm">
+                    Register User <ChevronRight size={16} className="group-hover:translate-x-1 transition-transform" />
+                  </div>
+                </button>
+              )}
 
               <div className="bg-industrial-card border border-industrial-border border-dashed p-8 rounded-2xl flex flex-col items-center justify-center text-center opacity-50 cursor-not-allowed">
                 <Settings className="text-industrial-text-muted mb-4" size={32} />
@@ -7068,12 +7546,12 @@ ${PDF_PRINT_STYLES}
                         const counts = {
                           tested: job.tests.filter(t => t.stage === 'Tested' && t.accepted !== false).length,
                           reviewed: job.tests.filter(t => t.stage === 'Reviewed' && t.accepted !== false).length,
-                          authorized: job.tests.filter(t => t.stage === 'Authorized' && t.accepted !== false).length,
+                          authorized: job.tests.filter(t => isTestCompleted(t) && t.accepted !== false).length,
                           total: job.tests.filter(t => t.accepted !== false).length || 1
                         };
                         
                         const processingTests = job.tests.filter(t => t.accepted !== false && t.stage !== 'Authorized');
-                        const completedTests = job.tests.filter(t => t.accepted !== false && t.stage === 'Authorized');
+                        const completedTests = job.tests.filter(t => t.accepted !== false && isTestCompleted(t));
 
                         let ongoingStageLabel = 'Processing';
                         let stageColor = 'text-amber-500';
@@ -7334,21 +7812,27 @@ ${PDF_PRINT_STYLES}
             <div className="space-y-6">
               <div className="bg-industrial-bg border border-industrial-border rounded-xl p-6">
                 <label className="block text-xs font-mono uppercase text-industrial-text-muted mb-3 ml-1">Job Designation</label>
-                <input 
-                  type="text" 
-                  id="job-name-input"
-                  value={jobName}
-                  onChange={(e) => setJobName(e.target.value)}
-                  placeholder="e.g. V/M/3214"
-                  className="w-full bg-transparent border-b border-industrial-border focus:border-industrial-accent py-2 text-xl font-medium focus:outline-none transition-colors"
-                  autoFocus
-                />
+                <div className="flex items-center border-b border-industrial-border focus-within:border-industrial-accent transition-colors">
+                  <span className="text-xl font-medium text-industrial-text-muted select-none shrink-0">V/M/</span>
+                  <input 
+                    type="text" 
+                    id="job-name-input"
+                    value={jobName.startsWith('V/M/') ? jobName.slice(4) : jobName}
+                    onChange={(e) => {
+                      const suffix = e.target.value.replace(/^V\/M\/?/i, '');
+                      setJobName(`V/M/${suffix}`);
+                    }}
+                    placeholder="Enter number"
+                    className="w-full bg-transparent py-2 text-xl font-medium focus:outline-none"
+                    autoFocus
+                  />
+                </div>
               </div>
 
               <button 
                 id="finalize-btn"
                 onClick={handleSaveJob}
-                disabled={!jobName.trim()}
+                disabled={jobName.trim() === 'V/M/' || !jobName.trim().startsWith('V/M/')}
                 className="w-full bg-industrial-accent hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-medium py-4 rounded-xl flex items-center justify-center gap-2 transition-all shadow-md"
               >
                 Complete Registration <CheckCircle2 size={20} />
@@ -7381,7 +7865,10 @@ ${PDF_PRINT_STYLES}
           >
             <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-8">
               <div>
-                <h2 className="text-2xl font-semibold mb-1">Testing Records</h2>
+                <h2 className="text-2xl font-semibold mb-1 flex items-center gap-2">
+                  <Search size={22} className="text-industrial-accent" />
+                  Testing Records
+                </h2>
                 <p className="text-sm text-industrial-text-muted">Historical log of all transformer testing jobs</p>
               </div>
               <div className="flex items-center gap-3">
@@ -7429,7 +7916,21 @@ ${PDF_PRINT_STYLES}
               </div>
 
               {/* Inline Filters */}
-              <div className="flex gap-4 w-full sm:w-auto overflow-x-auto justify-start sm:justify-end items-center py-1">
+              <div className="flex gap-3 w-full sm:w-auto overflow-x-auto justify-start sm:justify-end items-center py-1">
+                <div className="relative w-[140px] shrink-0">
+                  <span className="absolute left-2 top-1/2 -translate-y-1/2 text-industrial-accent pointer-events-none">
+                    <Search size={12} />
+                  </span>
+                  <input
+                    type="search"
+                    value={jobSearchQuery}
+                    onChange={(e) => setJobSearchQuery(e.target.value)}
+                    placeholder="Search..."
+                    aria-label="Search testing records"
+                    className="w-full bg-white border border-industrial-border rounded px-2 pl-7 py-1 text-xs font-medium text-industrial-text outline-none focus:border-industrial-accent transition-colors"
+                  />
+                </div>
+
                 <div className="flex items-center gap-2">
                   <span className="text-[10px] uppercase font-bold text-industrial-text-muted whitespace-nowrap">Capacity:</span>
                   <select
@@ -7458,11 +7959,12 @@ ${PDF_PRINT_STYLES}
                   </select>
                 </div>
 
-                {(filterCapacity !== 'All' || filterType !== 'All') && (
+                {(filterCapacity !== 'All' || filterType !== 'All' || jobSearchQuery.trim()) && (
                   <button
                     onClick={() => {
                       setFilterCapacity('All');
                       setFilterType('All');
+                      setJobSearchQuery('');
                     }}
                     className="text-[10px] text-red-500 hover:text-red-700 font-bold uppercase tracking-wider whitespace-nowrap"
                   >
@@ -7474,10 +7976,20 @@ ${PDF_PRINT_STYLES}
 
             <div className="bg-industrial-card border border-industrial-border rounded-2xl overflow-hidden shadow-2xl">
               {(() => {
+                const search = jobSearchQuery.trim().toLowerCase();
                 const tabJobs = jobs.filter(j => j.status === activeTab);
                 const filteredJobs = tabJobs
                   .filter(j => filterCapacity === 'All' || j.capacity === filterCapacity)
-                  .filter(j => filterType === 'All' || j.type === filterType);
+                  .filter(j => filterType === 'All' || j.type === filterType)
+                  .filter(j => {
+                    if (!search) return true;
+                    return (
+                      j.name.toLowerCase().includes(search) ||
+                      j.id.toLowerCase().includes(search) ||
+                      j.capacity.toLowerCase().includes(search) ||
+                      j.type.toLowerCase().includes(search)
+                    );
+                  });
 
                 if (tabJobs.length === 0) {
                   return (
@@ -7498,11 +8010,12 @@ ${PDF_PRINT_STYLES}
                         <History className="text-industrial-text-muted" size={40} />
                       </div>
                       <h3 className="text-sm font-bold text-industrial-text-muted uppercase tracking-widest mb-2">No Matching Records</h3>
-                      <p className="text-industrial-text-muted text-xs max-w-xs mb-4">No jobs match your selected configuration filters.</p>
+                      <p className="text-industrial-text-muted text-xs max-w-xs mb-4">No jobs match your search or selected filters.</p>
                       <button
                         onClick={() => {
                           setFilterCapacity('All');
                           setFilterType('All');
+                          setJobSearchQuery('');
                         }}
                         className="text-xs bg-industrial-bg px-3 py-1.5 border border-industrial-border font-bold uppercase rounded hover:bg-industrial-text/5 transition-colors"
                       >
@@ -7530,12 +8043,12 @@ ${PDF_PRINT_STYLES}
                           const counts = {
                             tested: job.tests.filter(t => t.stage === 'Tested' && t.accepted !== false).length,
                             reviewed: job.tests.filter(t => t.stage === 'Reviewed' && t.accepted !== false).length,
-                            authorized: job.tests.filter(t => t.stage === 'Authorized' && t.accepted !== false).length,
+                            authorized: job.tests.filter(t => isTestCompleted(t) && t.accepted !== false).length,
                             total: job.tests.filter(t => t.accepted !== false).length || 1
                           };
 
                           const processingTests = job.tests.filter(t => t.accepted !== false && t.stage !== 'Authorized');
-                          const completedTests = job.tests.filter(t => t.accepted !== false && t.stage === 'Authorized');
+                          const completedTests = job.tests.filter(t => t.accepted !== false && isTestCompleted(t));
 
                           let ongoingStageLabel = 'Not Started';
                           let stageColor = 'bg-gray-100 text-gray-500 border-gray-200';
@@ -7598,14 +8111,27 @@ ${PDF_PRINT_STYLES}
                               </td>
                               <td className="px-6 py-5 align-top text-right" onClick={(e) => e.stopPropagation()}>
                                 <div className="flex items-center justify-end gap-2">
-                                  <button
-                                    onClick={() => handleDownloadJobCard(job)}
-                                    title="Download Job Dossier"
-                                    className="p-1.5 bg-slate-100 hover:bg-slate-200 border border-slate-200 rounded-lg text-slate-600 hover:text-slate-800 transition-colors flex items-center justify-center gap-1 cursor-pointer focus:outline-none"
-                                  >
-                                    <FileDown size={14} />
-                                    <span className="text-[10px] uppercase font-bold px-1">Dossier</span>
-                                  </button>
+                                  {currentRole !== 'Admin_Tested' && (
+                                    <button
+                                      onClick={() => handleDownloadJobCard(job)}
+                                      title="Download Job Dossier"
+                                      className="p-1.5 bg-slate-100 hover:bg-slate-200 border border-slate-200 rounded-lg text-slate-600 hover:text-slate-800 transition-colors flex items-center justify-center gap-1 cursor-pointer focus:outline-none"
+                                    >
+                                      <FileDown size={14} />
+                                      <span className="text-[10px] uppercase font-bold px-1">Dossier</span>
+                                    </button>
+                                  )}
+                                  {currentRole === 'Admin_Authorized' && (
+                                    <button
+                                      type="button"
+                                      onClick={() => openDeleteJobConfirm(job.id)}
+                                      title="Delete Job"
+                                      className="p-1.5 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-lg text-rose-600 hover:text-rose-700 transition-colors flex items-center justify-center gap-1 cursor-pointer focus:outline-none"
+                                    >
+                                      <Trash2 size={14} />
+                                      <span className="text-[10px] uppercase font-bold px-1">Delete</span>
+                                    </button>
+                                  )}
                                   <div 
                                     onClick={() => { setSelectedJobId(job.id); setView('JOB_DETAIL'); }}
                                     className={`inline-flex items-center gap-2 px-2 py-1 rounded text-[10px] uppercase font-bold cursor-pointer ${
@@ -7657,12 +8183,23 @@ ${PDF_PRINT_STYLES}
                 </div>
               </div>
               <div className="flex items-center gap-3">
-                <button
-                  onClick={() => handleDownloadJobCard(selectedJob)}
-                  className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold uppercase tracking-wider px-4 py-2.5 rounded-lg transition-all flex items-center gap-1.5 shadow-md shadow-emerald-500/15 cursor-pointer"
-                >
-                  <FileDown size={14} /> Download Job Dossier
-                </button>
+                {currentRole === 'Admin_Authorized' && (
+                  <button
+                    type="button"
+                    onClick={() => openDeleteJobConfirm(selectedJob.id)}
+                    className="bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold uppercase tracking-wider px-4 py-2.5 rounded-lg transition-all flex items-center gap-1.5 shadow-md shadow-rose-500/15 cursor-pointer"
+                  >
+                    <Trash2 size={14} /> Delete Job
+                  </button>
+                )}
+                {currentRole !== 'Admin_Tested' && (
+                  <button
+                    onClick={() => handleDownloadJobCard(selectedJob)}
+                    className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold uppercase tracking-wider px-4 py-2.5 rounded-lg transition-all flex items-center gap-1.5 shadow-md shadow-emerald-500/15 cursor-pointer"
+                  >
+                    <FileDown size={14} /> Download Job Dossier
+                  </button>
+                )}
                 <div className="hidden md:block">
                   <div className="bg-industrial-accent/10 border border-industrial-accent/20 px-4 py-2 rounded-lg flex items-center gap-3">
                     <div className="text-right">
@@ -7754,15 +8291,20 @@ ${PDF_PRINT_STYLES}
                           <div 
                             key={test.id} 
                             className={`p-6 flex flex-col md:flex-row md:items-center justify-between gap-6 transition-colors ${
-                              test.stage === 'Authorized' ? 'bg-green-50/30' : 'hover:bg-industrial-bg/20'
+                              isTestCompleted(test) ? 'bg-green-50/30' : 'hover:bg-industrial-bg/20'
                             }`}
                           >
                             <div className="flex-1">
                               <div className="flex items-center gap-3">
                                 <h4 className="font-medium text-lg mb-1">{test.name}</h4>
-                                {test.stage === 'Authorized' && (
+                                {isTestCompleted(test) && (
                                   <span className="px-2 py-0.5 bg-green-500 text-white text-[10px] font-bold rounded uppercase flex items-center gap-1 shadow-sm">
                                     <CheckCircle2 size={10} /> Completed
+                                  </span>
+                                )}
+                                {test.stage === 'Authorized' && !getSelectedAuthorizer(test) && (
+                                  <span className="px-2 py-0.5 bg-amber-100 text-amber-700 text-[10px] font-bold rounded uppercase border border-amber-200">
+                                    Awaiting Authorizer Sign-Off
                                   </span>
                                 )}
                               </div>
@@ -7789,7 +8331,17 @@ ${PDF_PRINT_STYLES}
                                     <ClipboardList size={14} /> 
                                     {test.observationData ? 'View/Edit Test Report' : 'Fill Test Report'}
                                   </button>
-                                  {test.stage === 'Authorized' && (
+                                  {currentRole === 'Admin_Reviewed' && test.accepted === true && test.stage === 'Not Started' && (
+                                    <button
+                                      type="button"
+                                      onClick={() => openTakeBackConfirm(selectedJob.id, test.id)}
+                                      className="text-xs font-bold text-rose-600 hover:text-rose-700 underline flex items-center gap-1"
+                                    >
+                                      <XCircle size={14} />
+                                      Take Back Offer
+                                    </button>
+                                  )}
+                                  {test.stage === 'Authorized' && currentRole !== 'Admin_Tested' && (
                                     <button 
                                       onClick={() => handleDownloadTestReport(selectedJob, test)}
                                       className="text-xs font-bold text-emerald-600 hover:text-emerald-700 underline flex items-center gap-1.5 cursor-pointer"
@@ -7804,7 +8356,7 @@ ${PDF_PRINT_STYLES}
                                   <div className="text-xs text-industrial-text-muted flex items-center gap-1 font-semibold bg-gray-100/60 px-2 py-1 rounded w-fit border border-gray-200">
                                     <Lock size={12} className="text-gray-400" /> Report Locked ({test.stage})
                                   </div>
-                                  {test.stage === 'Authorized' && (
+                                  {test.stage === 'Authorized' && currentRole !== 'Admin_Tested' && (
                                     <button 
                                       onClick={() => handleDownloadTestReport(selectedJob, test)}
                                       className="text-xs font-bold text-emerald-600 hover:text-emerald-700 underline flex items-center gap-1.5 cursor-pointer"
@@ -7840,16 +8392,44 @@ ${PDF_PRINT_STYLES}
                                   const isReviewedAdminLocked = currentRole === 'Admin_Reviewed' && test.stage === 'Authorized';
                                   const isStageLocked = isTestedAdminLocked || isReviewedAdminLocked;
 
+                                  const stageButtonClass = (() => {
+                                    const base =
+                                      'px-4 py-2 rounded-lg text-[11px] font-bold uppercase tracking-wider transition-all border';
+                                    // Authorized: blue before approval, green after Authorizer approval
+                                    if (stage === 'Authorized') {
+                                      if (isTestCompleted(test)) {
+                                        return `${base} bg-green-600 text-white border-green-600 shadow-md shadow-green-600/20`;
+                                      }
+                                      if (canClick && !isStageLocked) {
+                                        return `${base} bg-blue-600 text-white border-blue-600 shadow-md shadow-blue-600/25 hover:bg-blue-700`;
+                                      }
+                                      return `${base} bg-blue-100 text-blue-700 border-blue-300 cursor-not-allowed opacity-70`;
+                                    }
+                                    if (isActive) {
+                                      return `${base} bg-industrial-accent text-white border-industrial-accent shadow-md shadow-industrial-accent/20`;
+                                    }
+                                    if (canClick && !isStageLocked) {
+                                      return `${base} bg-white text-industrial-accent border-industrial-accent/30 hover:bg-industrial-accent/5`;
+                                    }
+                                    return `${base} bg-industrial-bg/50 text-industrial-text-muted border-industrial-border cursor-not-allowed opacity-40`;
+                                  })();
+
                                   return (
                                     <button
                                       key={stage}
+                                      type="button"
                                       disabled={(!canClick && !isCurrentStage) || isStageLocked}
-                                      onClick={() => {
+                                      onClick={async () => {
                                         if (isStageLocked) return;
                                         const isReportable = test.name.toUpperCase() === 'CT TEST' || test.name.toUpperCase() === 'BUSHING TEST' || test.name.toUpperCase() === '2 KV TEST' || test.name.toUpperCase() === 'PRE-CONNECTION TEST' || test.name.toUpperCase() === 'POST-CONNECTION TEST' || test.name.toUpperCase() === 'PRE & POST VPD SERVICING' || test.name.toUpperCase().includes('OIL SOAKING') || test.name.toUpperCase() === 'POST-TANKING TEST' || test.name.toUpperCase() === 'FINAL LV TEST REPORT' || test.name.toUpperCase() === 'CHECKLIST FOR TFR BEFORE HV' || test.name.toUpperCase() === 'LIST OF HV TEST';
                                         if (canClick) {
-                                          handleUpdateTestStage(selectedJob.id, test.id, stage);
-                                          if (isReportable && (stage === 'Reviewed' || stage === 'Authorized')) {
+                                          const ok = await handleUpdateTestStage(selectedJob.id, test.id, stage);
+                                          if (!ok) return;
+                                          // After Authorizer approves, stay on job detail so Authorized button turns green
+                                          if (stage === 'Authorized') {
+                                            return;
+                                          }
+                                          if (isReportable && stage === 'Reviewed') {
                                             if (currentRole === 'Admin_Tested' || currentRole === 'Admin_Reviewed') return;
                                             setEditingTestId(test.id);
                                             setView('TEST_REPORT');
@@ -7863,17 +8443,7 @@ ${PDF_PRINT_STYLES}
                                           setView('TEST_REPORT');
                                         }
                                       }}
-                                      className={`
-                                        px-4 py-2 rounded-lg text-[11px] font-bold uppercase tracking-wider transition-all border
-                                        ${isActive 
-                                          ? (stage === 'Authorized' ? 'bg-green-600 text-white border-green-600 shadow-md shadow-green-600/20' : 'bg-industrial-accent text-white border-industrial-accent shadow-md shadow-industrial-accent/20')
-                                          : canClick
-                                            ? 'bg-white text-industrial-accent border-industrial-accent/30 hover:bg-industrial-accent/5'
-                                            : (stage === 'Authorized' && test.stage === 'Authorized')
-                                              ? 'bg-green-50 text-green-700 border-green-600 font-black'
-                                              : 'bg-industrial-bg/50 text-industrial-text-muted border-industrial-border cursor-not-allowed opacity-40'
-                                        }
-                                      `}
+                                      className={stageButtonClass}
                                     >
                                       {stage}
                                     </button>
@@ -7993,6 +8563,7 @@ ${PDF_PRINT_STYLES}
               </button>
             </div>
 
+            <div id="printable-test-report" data-test-id={editingTest.id} className="space-y-6">
             <JobRatingForm 
               job={selectedJob} 
               onUpdate={(data) => handleUpdateJobRating(selectedJob.id, data)} 
@@ -8079,9 +8650,10 @@ ${PDF_PRINT_STYLES}
                 )}
               </div>
             </FormContext.Provider>
+            </div>
 
              {/* Bottom Actions */}
-             <div className="mt-8 flex justify-center gap-4 flex-wrap">
+             <div className="mt-8 flex justify-center gap-4 flex-wrap no-print">
                {editingTest.stage === 'Reviewed' && (
                  <button 
                    onClick={() => {
@@ -8097,41 +8669,43 @@ ${PDF_PRINT_STYLES}
  
                {editingTest.stage === 'Authorized' && (
                  <>
-                   <button 
-                     onClick={() => {
-                       setToast({
-                         message: `${editingTest.name} approved successfully.`,
-                         type: 'success'
-                       });
-                       setView('JOB_DETAIL');
-                     }}
-                     className="bg-green-600 hover:bg-green-700 shadow-md shadow-green-600/20 text-white px-8 py-4 rounded-2xl font-bold transition-all flex items-center gap-2 text-lg cursor-pointer"
+                   <button
+                     type="button"
+                     onClick={() => setView('JOB_DETAIL')}
+                     className={`${
+                       isTestCompleted(editingTest)
+                         ? 'bg-green-600 hover:bg-green-700 shadow-green-600/20'
+                         : 'bg-blue-600 hover:bg-blue-700 shadow-blue-600/20'
+                     } text-white px-12 py-4 rounded-2xl font-bold shadow-md transition-all flex items-center gap-2 text-lg cursor-pointer`}
                    >
                      <CheckCircle2 size={24} />
-                     Approve
+                     {isTestCompleted(editingTest) ? 'Approved' : 'Select Authorizer to Complete'}
                    </button>
-                   <button 
-                     onClick={() => {
-                       handleRejectTestStage(selectedJob.id, editingTest.id, 'Reviewed');
-                       setView('JOB_DETAIL');
-                     }}
-                     className="bg-red-600 hover:bg-red-700 shadow-md shadow-red-600/20 text-white px-8 py-4 rounded-2xl font-bold transition-all flex items-center gap-2 text-lg cursor-pointer"
-                   >
-                     <XCircle size={24} />
-                     Reject to Reviewed
-                   </button>
+                   {currentRole === 'Admin_Authorized' && (
+                     <button 
+                       onClick={() => {
+                         handleRejectTestStage(selectedJob.id, editingTest.id, 'Reviewed');
+                       }}
+                       className="bg-red-600 hover:bg-red-700 shadow-md shadow-red-600/20 text-white px-8 py-4 rounded-2xl font-bold transition-all flex items-center gap-2 text-lg cursor-pointer"
+                     >
+                       <XCircle size={24} />
+                       Reject to Reviewed
+                     </button>
+                   )}
                  </>
                )}
  
                {editingTest.stage !== 'Authorized' && (
                  <>
-                   <button 
-                     onClick={() => handleDownloadTestReport(selectedJob, editingTest)}
-                     className="bg-emerald-600 hover:bg-emerald-700 shadow-md shadow-emerald-600/20 text-white px-8 py-4 rounded-2xl font-bold transition-all flex items-center gap-2 text-lg cursor-pointer"
-                   >
-                     <FileDown size={24} />
-                     Download PDF Report
-                   </button>
+                   {currentRole !== 'Admin_Tested' && (
+                     <button 
+                       onClick={() => handleDownloadTestReport(selectedJob, editingTest)}
+                       className="bg-emerald-600 hover:bg-emerald-700 shadow-md shadow-emerald-600/20 text-white px-8 py-4 rounded-2xl font-bold transition-all flex items-center gap-2 text-lg cursor-pointer"
+                     >
+                       <FileDown size={24} />
+                       Download PDF Report
+                     </button>
+                   )}
                    <button 
                      onClick={() => {
                        setToast({
@@ -8148,7 +8722,7 @@ ${PDF_PRINT_STYLES}
                  </>
                )}
 
-               {editingTest.stage === 'Authorized' && (
+               {editingTest.stage === 'Authorized' && currentRole !== 'Admin_Tested' && (
                  <button 
                    onClick={() => handleDownloadTestReport(selectedJob, editingTest)}
                    className="bg-emerald-600 hover:bg-emerald-700 shadow-md shadow-emerald-600/20 text-white px-8 py-4 rounded-2xl font-bold transition-all flex items-center gap-2 text-lg cursor-pointer"
@@ -8160,26 +8734,37 @@ ${PDF_PRINT_STYLES}
 
                {editingTest.stage !== 'Authorized' && (
                  <button 
-                   onClick={() => {
+                   onClick={async () => {
                      const isReportable = editingTest.name.toUpperCase() === 'CT TEST' || editingTest.name.toUpperCase() === 'BUSHING TEST' || editingTest.name.toUpperCase() === '2 KV TEST' || editingTest.name.toUpperCase() === 'PRE-CONNECTION TEST' || editingTest.name.toUpperCase() === 'POST-CONNECTION TEST' || editingTest.name.toUpperCase() === 'PRE & POST VPD SERVICING' || editingTest.name.toUpperCase().includes('OIL SOAKING') || editingTest.name.toUpperCase() === 'POST-TANKING TEST' || editingTest.name.toUpperCase() === 'FINAL LV TEST REPORT' || editingTest.name.toUpperCase() === 'CHECKLIST FOR TFR BEFORE HV' || editingTest.name.toUpperCase() === 'LIST OF HV TEST';
                      if (isReportable) {
                        if (editingTest.stage === 'Tested') {
-                         handleUpdateTestStage(selectedJob.id, editingTest.id, 'Reviewed');
-                       } else if (editingTest.stage === 'Reviewed') {
-                         handleUpdateTestStage(selectedJob.id, editingTest.id, 'Authorized');
+                         const ok = await handleUpdateTestStage(selectedJob.id, editingTest.id, 'Reviewed');
+                         if (!ok) return;
+                         setView('JOB_DETAIL');
+                         return;
+                       }
+                       if (editingTest.stage === 'Reviewed') {
+                         const ok = await handleUpdateTestStage(selectedJob.id, editingTest.id, 'Authorized');
+                         if (!ok) return;
+                         // Stay on report so Authorizer sees Approve button turn green
+                         setToast({
+                           message: `${editingTest.name} approved successfully.`,
+                           type: 'success',
+                         });
+                         return;
                        }
                      }
                      setView('JOB_DETAIL');
                    }}
                    className={`${
-                     editingTest.stage === 'Reviewed' 
-                       ? 'bg-green-600 hover:bg-green-700 shadow-green-600/20' 
+                     editingTest.stage === 'Reviewed'
+                       ? 'bg-blue-600 hover:bg-blue-700 shadow-blue-600/20'
                        : 'bg-industrial-accent hover:bg-blue-600 shadow-industrial-accent/20'
                    } text-white px-12 py-4 rounded-2xl font-bold shadow-xl transition-all flex items-center gap-3 text-lg group cursor-pointer`}
                  >
                    <CheckCircle2 size={24} className="group-hover:scale-110 transition-transform" /> 
                    {editingTest.stage === 'Tested' ? 'Submit to Reviewer' : 
-                    editingTest.stage === 'Reviewed' ? 'Approve & Finalize Report' : 
+                    editingTest.stage === 'Reviewed' ? 'Approve' : 
                     'Save Observations'}
                  </button>
                )}

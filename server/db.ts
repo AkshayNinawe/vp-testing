@@ -70,6 +70,10 @@ export async function insertUser(user: AuthUser): Promise<AuthUser> {
   return user;
 }
 
+export async function countUsersByRole(role: AuthUser['role']): Promise<number> {
+  return users().countDocuments({ role });
+}
+
 export async function listJobs(): Promise<Job[]> {
   const docs = await jobs().find({}).sort({ createdAt: -1 }).toArray();
   return docs.map(doc => stripMongoId(doc));
@@ -100,4 +104,9 @@ export async function updateJobById(
   const next = mutator(existing);
   if (!next) return null;
   return replaceJob(next);
+}
+
+export async function deleteJobById(jobId: string): Promise<boolean> {
+  const result = await jobs().deleteOne({ id: jobId });
+  return result.deletedCount > 0;
 }

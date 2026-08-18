@@ -16,6 +16,7 @@
 @layer base {
   body {
     @apply bg-industrial-bg text-industrial-text font-sans antialiased;
+    margin-top: 50px;
   }
 }
 
