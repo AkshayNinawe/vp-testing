@@ -45,23 +45,28 @@ import type {
 
 const app = express();
 const PORT = Number(process.env.PORT || 4000);
-const CORS_ORIGINS = (process.env.CORS_ORIGINS || process.env.APP_URL || 'http://localhost:3000')
+const DEFAULT_CORS_ORIGINS = 'http://localhost:3000,http://127.0.0.1:3000,https://test.apivishvaspower.com';
+const CORS_ORIGINS = (process.env.CORS_ORIGINS || process.env.APP_URL || DEFAULT_CORS_ORIGINS)
   .split(',')
-  .map(origin => origin.trim())
+  .map(origin => origin.trim().replace(/\/$/, ''))
   .filter(Boolean);
+
+// Required when Express sits behind nginx / a reverse proxy (production HTTPS).
+app.set('trust proxy', 1);
 
 app.use(
   cors({
     origin(origin, callback) {
       if (!origin) return callback(null, true);
+      const normalized = origin.replace(/\/$/, '');
       const allowed =
         CORS_ORIGINS.includes('*') ||
-        CORS_ORIGINS.includes(origin) ||
-        origin.includes('localhost') ||
-        origin.includes('127.0.0.1') ||
-        origin.includes('test.apivishvaspower.com') ||
-        origin.includes('vishwaspower.in') ||
-        origin.includes('apivishvaspower.com');
+        CORS_ORIGINS.includes(normalized) ||
+        normalized.includes('localhost') ||
+        normalized.includes('127.0.0.1') ||
+        normalized.includes('test.apivishvaspower.com') ||
+        normalized.includes('vishwaspower.in') ||
+        normalized.includes('apivishvaspower.com');
       if (allowed) return callback(null, true);
       return callback(null, false);
     },

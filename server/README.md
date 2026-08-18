@@ -19,6 +19,19 @@ npm run dev:all
 
 Frontend: `http://localhost:3000` → proxies `/api` to backend.
 
+## Production (https://test.apivishvaspower.com/)
+
+Serve the Vite build from that host and reverse-proxy `/api` to this Express app.
+
+Backend env (see `server/.env.example`):
+
+```
+APP_URL=https://test.apivishvaspower.com
+CORS_ORIGINS=https://test.apivishvaspower.com,http://localhost:3000
+```
+
+Frontend production build uses empty `VITE_API_URL` so requests go to same-origin `/api`.
+
 ## Endpoints
 
 ### Auth

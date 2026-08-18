@@ -6260,7 +6260,7 @@ ${PDF_PRINT_STYLES}
       const msg = err instanceof Error ? err.message : 'Registration failed.';
       setAuthError(
         msg === 'Failed to fetch'
-          ? 'Cannot reach API at https://vishwaspower.in/testing. Deploy the VoltTrack backend there or update VITE_API_URL.'
+          ? 'Cannot reach API. Confirm the backend is running for https://test.apivishvaspower.com (same-origin /api) or set VITE_API_URL.'
           : msg
       );
     }

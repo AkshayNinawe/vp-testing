@@ -17,6 +17,10 @@
 - Frontend: http://localhost:3000
 - API: http://localhost:4000
 
+### Production
+- Frontend: https://test.apivishvaspower.com/
+- API: same origin `/api` (reverse-proxy to Express). Set `CORS_ORIGINS` / `APP_URL` on the server (see `server/.env.example`).
+
 Or separately:
 - `npm run dev:server` — API only
 - `npm run dev` — frontend only (proxies `/api` → `:4000`)
