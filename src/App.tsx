@@ -31,7 +31,9 @@ import {
   UserPlus,
   Bell,
   Search,
-  Trash2
+  Trash2,
+  Pencil,
+  Users
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { AppView, Job, TransformerCapacity, TransformerType, TransformerTest, TestStage, JobStatus, UserRole, AuthRole, AuthUser } from './types';
@@ -57,6 +59,9 @@ import {
   markNotificationRead,
   pushNotification,
   registerLocalUser,
+  listLocalUsers,
+  updateLocalUser,
+  deleteLocalUser,
   saveLocalJobs,
   setOfflineMode,
   unacceptLocalTest,
@@ -5500,6 +5505,9 @@ export default function App() {
   const [staffPassword, setStaffPassword] = useState('');
   const [staffConfirmPassword, setStaffConfirmPassword] = useState('');
   const [staffError, setStaffError] = useState('');
+  const [staffList, setStaffList] = useState<AuthUser[]>([]);
+  const [editingStaffId, setEditingStaffId] = useState<string | null>(null);
+  const [deleteStaffConfirm, setDeleteStaffConfirm] = useState<AuthUser | null>(null);
   const [roleNotifications, setRoleNotifications] = useState<AppNotification[]>([]);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
 
@@ -6289,13 +6297,180 @@ ${PDF_PRINT_STYLES}
     setStaffPassword('');
     setStaffConfirmPassword('');
     setStaffError('');
+    setEditingStaffId(null);
     setToast({
       message: offline
         ? `${role} account registered offline. They can login with that role.`
         : `${role} account registered.`,
       type: 'success',
     });
-    setView('DASHBOARD');
+    void loadStaffList();
+    setView('STAFF_LIST');
+  };
+
+  const loadStaffList = async () => {
+    if (currentUser?.role !== 'Authorizer') {
+      setStaffList([]);
+      return;
+    }
+    if (offlineMode || isOfflineMode()) {
+      setStaffList(listLocalUsers());
+      return;
+    }
+    try {
+      const { users } = await api.listUsers();
+      setStaffList(users);
+    } catch (err) {
+      if (isNetworkError(err)) {
+        setStaffList(listLocalUsers());
+        return;
+      }
+      setToast({
+        message: err instanceof Error ? err.message : 'Failed to load staff',
+        type: 'error',
+      });
+    }
+  };
+
+  const startEditStaff = (user: AuthUser) => {
+    setEditingStaffId(user.id);
+    setStaffName(user.name);
+    setStaffUsername(user.username);
+    setStaffRole(user.role === 'Authorizer' ? 'Tester' : (STAFF_ROLES.includes(user.role) ? user.role : 'Tester'));
+    // Keep Authorizer role editable only as display if editing authorizer - use staffRole for Tester/Reviewer only
+    if (user.role === 'Authorizer') {
+      // editing authorizer: keep role locked as Authorizer via separate path
+      setStaffRole('Tester'); // placeholder; handleSave will preserve Authorizer
+    }
+    setStaffPassword('');
+    setStaffConfirmPassword('');
+    setStaffError('');
+    setView('REGISTER_STAFF');
+  };
+
+  const resetStaffForm = () => {
+    setEditingStaffId(null);
+    setStaffName('');
+    setStaffUsername('');
+    setStaffPassword('');
+    setStaffConfirmPassword('');
+    setStaffRole('Tester');
+    setStaffError('');
+  };
+
+  const handleSaveStaff = async () => {
+    if (currentUser?.role !== 'Authorizer') {
+      setStaffError('Only an Authorizer can manage staff accounts.');
+      return;
+    }
+
+    const editing = editingStaffId ? staffList.find(u => u.id === editingStaffId) : null;
+    const name = staffName.trim();
+    const username = staffUsername.trim().toLowerCase();
+    const password = staffPassword;
+    const confirmPassword = staffConfirmPassword;
+
+    if (!name || !username) {
+      setStaffError('Name and username are required.');
+      return;
+    }
+
+    if (editing) {
+      const role = editing.role === 'Authorizer' ? 'Authorizer' : staffRole;
+      if (editing.role !== 'Authorizer' && !STAFF_ROLES.includes(staffRole)) {
+        setStaffError('Select Tester or Reviewer.');
+        return;
+      }
+      if (password) {
+        if (password.length < 4) {
+          setStaffError('Password must be at least 4 characters.');
+          return;
+        }
+        if (password !== confirmPassword) {
+          setStaffError('Passwords do not match.');
+          return;
+        }
+      }
+
+      const body = {
+        name,
+        username,
+        role,
+        ...(password ? { password } : {}),
+      };
+
+      if (offlineMode || isOfflineMode()) {
+        try {
+          updateLocalUser(editing.id, body);
+          setToast({ message: 'Staff account updated (offline).', type: 'success' });
+          resetStaffForm();
+          await loadStaffList();
+          setView('STAFF_LIST');
+        } catch (err) {
+          setStaffError(err instanceof Error ? err.message : 'Update failed.');
+        }
+        return;
+      }
+
+      try {
+        await api.updateUser(editing.id, body);
+        setToast({ message: 'Staff account updated.', type: 'success' });
+        resetStaffForm();
+        await loadStaffList();
+        setView('STAFF_LIST');
+      } catch (err) {
+        if (isNetworkError(err)) {
+          try {
+            updateLocalUser(editing.id, body);
+            setToast({ message: 'Staff account updated offline.', type: 'success' });
+            resetStaffForm();
+            await loadStaffList();
+            setView('STAFF_LIST');
+            return;
+          } catch (localErr) {
+            setStaffError(localErr instanceof Error ? localErr.message : 'Update failed.');
+            return;
+          }
+        }
+        setStaffError(err instanceof Error ? err.message : 'Update failed.');
+      }
+      return;
+    }
+  };
+
+  const handleDeleteStaff = async (user: AuthUser) => {
+    if (currentUser?.role !== 'Authorizer') return;
+    if (offlineMode || isOfflineMode()) {
+      try {
+        deleteLocalUser(user.id, currentUser.id);
+        setDeleteStaffConfirm(null);
+        setToast({ message: `${user.name} deleted.`, type: 'success' });
+        await loadStaffList();
+      } catch (err) {
+        setToast({ message: err instanceof Error ? err.message : 'Delete failed.', type: 'error' });
+      }
+      return;
+    }
+    try {
+      await api.deleteUser(user.id);
+      setDeleteStaffConfirm(null);
+      setToast({ message: `${user.name} deleted.`, type: 'success' });
+      await loadStaffList();
+    } catch (err) {
+      if (isNetworkError(err)) {
+        try {
+          deleteLocalUser(user.id, currentUser.id);
+          setDeleteStaffConfirm(null);
+          setToast({ message: `${user.name} deleted offline.`, type: 'success' });
+          await loadStaffList();
+          return;
+        } catch (localErr) {
+          setToast({ message: localErr instanceof Error ? localErr.message : 'Delete failed.', type: 'error' });
+          return;
+        }
+      }
+      setToast({ message: err instanceof Error ? err.message : 'Delete failed.', type: 'error' });
+    }
   };
 
   const handleRegisterStaff = async () => {
@@ -6356,6 +6531,12 @@ ${PDF_PRINT_STYLES}
     }
   };
 
+  useEffect(() => {
+    if (currentUser?.role === 'Authorizer' && (view === 'STAFF_LIST' || view === 'REGISTER_STAFF')) {
+      void loadStaffList();
+    }
+  }, [currentUser?.role, view, offlineMode]);
+
   const handleLogout = async () => {
     // Skip remote logout when offline to avoid noisy proxy errors
     if (!offlineMode && !isOfflineMode() && api.getToken()) {
@@ -6371,6 +6552,7 @@ ${PDF_PRINT_STYLES}
     setCurrentUser(null);
     setCurrentRole('Admin_Tested');
     setJobs([]);
+    setStaffList([]);
     setRoleNotifications([]);
     setNotificationsOpen(false);
     resetAuthForm();
@@ -7001,6 +7183,56 @@ ${PDF_PRINT_STYLES}
       </AnimatePresence>
 
       <AnimatePresence>
+        {deleteStaffConfirm && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[70] flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm"
+            onClick={() => setDeleteStaffConfirm(null)}
+          >
+            <motion.div
+              initial={{ opacity: 0, y: 12, scale: 0.96 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 12, scale: 0.96 }}
+              onClick={(e) => e.stopPropagation()}
+              className="w-full max-w-md rounded-2xl border border-industrial-border bg-white shadow-2xl p-6 space-y-4"
+            >
+              <div className="flex items-start gap-3">
+                <div className="mt-0.5 rounded-full bg-rose-50 p-2 text-rose-600">
+                  <Trash2 size={20} />
+                </div>
+                <div className="space-y-1">
+                  <h3 className="text-base font-bold text-industrial-text">Delete staff?</h3>
+                  <p className="text-sm text-industrial-text-muted leading-relaxed">
+                    Remove <span className="font-semibold text-industrial-text">{deleteStaffConfirm.name}</span>
+                    {' '}({deleteStaffConfirm.role}) — username <span className="font-mono">{deleteStaffConfirm.username}</span>?
+                    They will no longer be able to log in.
+                  </p>
+                </div>
+              </div>
+              <div className="flex justify-end gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setDeleteStaffConfirm(null)}
+                  className="px-4 py-2 rounded-xl text-xs font-bold uppercase tracking-wider text-industrial-text-muted hover:bg-slate-100 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { void handleDeleteStaff(deleteStaffConfirm); }}
+                  className="px-4 py-2 rounded-xl text-xs font-bold uppercase tracking-wider bg-rose-600 text-white hover:bg-rose-700 transition-colors"
+                >
+                  Delete
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
         {deleteJobConfirm && (
           <motion.div
             initial={{ opacity: 0 }}
@@ -7335,22 +7567,29 @@ ${PDF_PRINT_STYLES}
             initial="hidden"
             animate="visible"
             exit="exit"
-            className="w-full max-w-md bg-industrial-card border border-industrial-border p-8 rounded-2xl shadow-2xl"
+            className="w-full max-w-3xl bg-industrial-card border border-industrial-border p-8 rounded-2xl shadow-2xl"
           >
             <button
               type="button"
-              onClick={() => setView('DASHBOARD')}
+              onClick={() => {
+                resetStaffForm();
+                setView('STAFF_LIST');
+              }}
               className="mb-6 flex items-center gap-2 text-sm text-industrial-text-muted hover:text-industrial-text transition-colors"
             >
-              <ArrowLeft size={16} /> Back to Dashboard
+              <ArrowLeft size={16} /> Back to Registered Staff
             </button>
             <div className="flex items-center gap-3 mb-6">
               <div className="p-2 bg-industrial-accent/10 rounded-lg">
-                <UserPlus className="text-industrial-accent" size={20} />
+                {editingStaffId ? <Pencil className="text-industrial-accent" size={20} /> : <UserPlus className="text-industrial-accent" size={20} />}
               </div>
               <div>
-                <h2 className="text-xl font-medium">Register Staff</h2>
-                <p className="text-xs text-industrial-text-muted">Authorizer-only: create Tester or Reviewer</p>
+                <h2 className="text-xl font-medium">{editingStaffId ? 'Edit Staff' : 'Register Staff'}</h2>
+                <p className="text-xs text-industrial-text-muted">
+                  {editingStaffId
+                    ? 'Update name, username, role, or password'
+                    : 'Authorizer-only: create Tester or Reviewer'}
+                </p>
               </div>
             </div>
 
@@ -7358,22 +7597,28 @@ ${PDF_PRINT_STYLES}
               <label className="block text-xs font-mono uppercase text-industrial-text-muted mb-2 ml-1">
                 Role
               </label>
-              <div className="grid grid-cols-2 gap-2">
-                {STAFF_ROLES.map(role => (
-                  <button
-                    key={role}
-                    type="button"
-                    onClick={() => setStaffRole(role)}
-                    className={`py-2.5 rounded-lg text-[10px] font-bold uppercase tracking-wide border transition-all ${
-                      staffRole === role
-                        ? 'bg-industrial-accent/10 border-industrial-accent text-industrial-accent'
-                        : 'bg-industrial-bg border-industrial-border text-industrial-text-muted hover:border-industrial-accent/40'
-                    }`}
-                  >
-                    {role}
-                  </button>
-                ))}
-              </div>
+              {editingStaffId && staffList.find(u => u.id === editingStaffId)?.role === 'Authorizer' ? (
+                <div className="py-2.5 px-3 rounded-lg text-[10px] font-bold uppercase tracking-wide border border-industrial-border bg-industrial-bg text-industrial-text-muted">
+                  Authorizer (locked)
+                </div>
+              ) : (
+                <div className="grid grid-cols-2 gap-2">
+                  {STAFF_ROLES.map(role => (
+                    <button
+                      key={role}
+                      type="button"
+                      onClick={() => setStaffRole(role)}
+                      className={`py-2.5 rounded-lg text-[10px] font-bold uppercase tracking-wide border transition-all ${
+                        staffRole === role
+                          ? 'bg-industrial-accent/10 border-industrial-accent text-industrial-accent'
+                          : 'bg-industrial-bg border-industrial-border text-industrial-text-muted hover:border-industrial-accent/40'
+                      }`}
+                    >
+                      {role}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
 
             <div className="space-y-4">
@@ -7398,22 +7643,26 @@ ${PDF_PRINT_STYLES}
                 />
               </div>
               <div>
-                <label className="block text-xs font-mono uppercase text-industrial-text-muted mb-1.5 ml-1">Password</label>
+                <label className="block text-xs font-mono uppercase text-industrial-text-muted mb-1.5 ml-1">
+                  {editingStaffId ? 'New Password (optional)' : 'Password'}
+                </label>
                 <input
                   type="password"
                   value={staffPassword}
                   onChange={(e) => setStaffPassword(e.target.value)}
-                  placeholder="Enter password"
+                  placeholder={editingStaffId ? 'Leave blank to keep current' : 'Enter password'}
                   className="w-full bg-industrial-bg border border-industrial-border rounded-lg px-4 py-3 focus:outline-none focus:border-industrial-accent transition-colors font-mono text-sm"
                 />
               </div>
               <div>
-                <label className="block text-xs font-mono uppercase text-industrial-text-muted mb-1.5 ml-1">Confirm Password</label>
+                <label className="block text-xs font-mono uppercase text-industrial-text-muted mb-1.5 ml-1">
+                  {editingStaffId ? 'Confirm New Password' : 'Confirm Password'}
+                </label>
                 <input
                   type="password"
                   value={staffConfirmPassword}
                   onChange={(e) => setStaffConfirmPassword(e.target.value)}
-                  placeholder="Re-enter password"
+                  placeholder={editingStaffId ? 'Re-enter new password' : 'Re-enter password'}
                   className="w-full bg-industrial-bg border border-industrial-border rounded-lg px-4 py-3 focus:outline-none focus:border-industrial-accent transition-colors font-mono text-sm"
                 />
               </div>
@@ -7426,22 +7675,142 @@ ${PDF_PRINT_STYLES}
 
               <button
                 type="button"
-                onClick={handleRegisterStaff}
+                onClick={() => { void (editingStaffId ? handleSaveStaff() : handleRegisterStaff()); }}
                 className="w-full bg-industrial-accent hover:bg-blue-700 text-white font-medium py-3 rounded-lg flex items-center justify-center gap-2 transition-all mt-2 shadow-sm"
               >
-                Register {staffRole} <ArrowRight size={18} />
+                {editingStaffId ? (
+                  <>Save Changes <Check size={18} /></>
+                ) : (
+                  <>Register {staffRole} <ArrowRight size={18} /></>
+                )}
               </button>
               <button
                 type="button"
                 onClick={() => {
-                  setStaffError('');
-                  setView('DASHBOARD');
-                  setToast({ message: 'Skipped staff registration for now', type: 'info' });
+                  resetStaffForm();
+                  setView('STAFF_LIST');
+                  if (!editingStaffId) {
+                    setToast({ message: 'Skipped staff registration for now', type: 'info' });
+                  }
                 }}
                 className="w-full mt-2 py-3 rounded-lg border border-industrial-border text-industrial-text-muted hover:text-industrial-text hover:border-industrial-accent/40 text-sm font-medium transition-all"
               >
-                Skip for now
+                {editingStaffId ? 'Cancel' : 'Skip for now'}
               </button>
+            </div>
+          </motion.div>
+        )}
+
+        {view === 'STAFF_LIST' && currentUser?.role === 'Authorizer' && (
+          <motion.div
+            key="staff-list"
+            variants={containerVariants}
+            initial="hidden"
+            animate="visible"
+            exit="exit"
+            className="w-full max-w-4xl"
+          >
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-8">
+              <div className="flex items-center gap-4">
+                <button
+                  type="button"
+                  onClick={() => setView('DASHBOARD')}
+                  className="p-2 hover:bg-industrial-border rounded-lg transition-colors border border-industrial-border"
+                >
+                  <ArrowLeft size={20} />
+                </button>
+                <div className="flex items-center gap-3">
+                  <div className="p-2 bg-industrial-accent/10 rounded-lg">
+                    <Users className="text-industrial-accent" size={20} />
+                  </div>
+                  <div>
+                    <h2 className="text-xl font-medium">Registered Staff</h2>
+                    <p className="text-xs text-industrial-text-muted">View, edit, or remove Tester and Reviewer accounts</p>
+                  </div>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  resetStaffForm();
+                  setView('REGISTER_STAFF');
+                }}
+                className="inline-flex items-center justify-center gap-2 bg-industrial-accent hover:bg-blue-700 text-white text-sm font-medium px-4 py-2.5 rounded-lg transition-colors shadow-sm"
+              >
+                <UserPlus size={16} /> Add Staff
+              </button>
+            </div>
+
+            <div className="bg-industrial-card border border-industrial-border rounded-2xl overflow-hidden shadow-sm">
+              {staffList.length === 0 ? (
+                <div className="p-16 text-center text-industrial-text-muted">
+                  <Users size={36} className="mx-auto mb-4 opacity-20" />
+                  <p className="text-sm mb-4">No registered staff yet.</p>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      resetStaffForm();
+                      setView('REGISTER_STAFF');
+                    }}
+                    className="text-sm font-medium text-industrial-accent hover:underline"
+                  >
+                    Register your first Tester or Reviewer
+                  </button>
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead className="bg-industrial-bg/60 text-[10px] uppercase tracking-widest text-industrial-text-muted border-b border-industrial-border">
+                      <tr>
+                        <th className="text-left p-4 font-bold">Name</th>
+                        <th className="text-left p-4 font-bold">Username</th>
+                        <th className="text-left p-4 font-bold">Role</th>
+                        <th className="text-right p-4 font-bold">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-industrial-border">
+                      {staffList.map(user => (
+                        <tr key={user.id} className="hover:bg-industrial-bg/30 transition-colors">
+                          <td className="p-4 font-medium text-industrial-text">{user.name}</td>
+                          <td className="p-4 font-mono text-xs text-industrial-text-muted">{user.username}</td>
+                          <td className="p-4">
+                            <span className={`inline-flex px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide ${
+                              user.role === 'Authorizer'
+                                ? 'bg-emerald-50 text-emerald-700 border border-emerald-100'
+                                : user.role === 'Reviewer'
+                                  ? 'bg-blue-50 text-blue-700 border border-blue-100'
+                                  : 'bg-slate-50 text-slate-700 border border-slate-200'
+                            }`}>
+                              {user.role}
+                            </span>
+                          </td>
+                          <td className="p-4">
+                            <div className="flex items-center justify-end gap-2">
+                              <button
+                                type="button"
+                                onClick={() => startEditStaff(user)}
+                                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-industrial-border text-xs font-medium text-industrial-text hover:border-industrial-accent hover:text-industrial-accent transition-colors"
+                                title="Edit staff"
+                              >
+                                <Pencil size={13} /> Edit
+                              </button>
+                              <button
+                                type="button"
+                                disabled={user.id === currentUser.id}
+                                onClick={() => setDeleteStaffConfirm(user)}
+                                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-red-100 text-xs font-medium text-red-600 hover:bg-red-50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                                title={user.id === currentUser.id ? 'Cannot delete your own account' : 'Delete staff'}
+                              >
+                                <Trash2 size={13} /> Delete
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </div>
           </motion.div>
         )}
@@ -7493,20 +7862,16 @@ ${PDF_PRINT_STYLES}
               {currentUser?.role === 'Authorizer' && (
                 <button
                   type="button"
-                  onClick={() => {
-                    setStaffError('');
-                    setStaffRole('Tester');
-                    setView('REGISTER_STAFF');
-                  }}
+                  onClick={() => setView('STAFF_LIST')}
                   className="group relative bg-industrial-card border border-industrial-border p-8 rounded-2xl hover:border-industrial-accent transition-all text-left overflow-hidden"
                 >
                   <div className="p-3 bg-industrial-accent/10 rounded-xl w-fit mb-4">
-                    <UserPlus className="text-industrial-accent" size={24} />
+                    <Users className="text-industrial-accent" size={24} />
                   </div>
-                  <h3 className="text-lg font-medium mb-1">Register Staff</h3>
-                  <p className="text-sm text-industrial-text-muted">Create Tester or Reviewer accounts</p>
+                  <h3 className="text-lg font-medium mb-1">Registered Staff</h3>
+                  <p className="text-sm text-industrial-text-muted">View, edit, or delete Tester and Reviewer accounts</p>
                   <div className="mt-6 flex items-center gap-2 text-industrial-accent font-medium text-sm">
-                    Register User <ChevronRight size={16} className="group-hover:translate-x-1 transition-transform" />
+                    Manage Staff <ChevronRight size={16} className="group-hover:translate-x-1 transition-transform" />
                   </div>
                 </button>
               )}

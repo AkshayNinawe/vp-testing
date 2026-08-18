@@ -9,10 +9,13 @@ import {
   findUserById,
   findUserByUsername,
   deleteJobById,
+  deleteUserById,
   insertJob,
   insertUser,
   listJobs,
+  listUsers,
   updateJobById,
+  updateUserById,
 } from './db';
 import {
   authRoleToUserRole,
@@ -36,6 +39,7 @@ import {
 } from './signOff';
 import type {
   AuthRole,
+  AuthUser,
   Job,
   TestStage,
   TransformerCapacity,
@@ -237,6 +241,107 @@ api.get('/auth/me', requireAuth, async (req: AuthedRequest, res) => {
 
 api.post('/auth/logout', requireAuth, (_req, res) => {
   return res.status(204).send();
+});
+
+api.get('/users', requireAuth, async (req: AuthedRequest, res) => {
+  try {
+    if (req.userRole !== 'Admin_Authorized') {
+      return res.status(403).json({ error: 'Only Authorizers can view registered staff' });
+    }
+    const users = await listUsers();
+    return res.json({ users: users.map(toPublicUser) });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: 'Failed to load users' });
+  }
+});
+
+api.patch('/users/:userId', requireAuth, async (req: AuthedRequest, res) => {
+  try {
+    if (req.userRole !== 'Admin_Authorized') {
+      return res.status(403).json({ error: 'Only Authorizers can edit staff' });
+    }
+
+    const existing = await findUserById(req.params.userId);
+    if (!existing) return res.status(404).json({ error: 'User not found' });
+
+    const name = req.body?.name !== undefined ? String(req.body.name || '').trim() : existing.name;
+    const username =
+      req.body?.username !== undefined
+        ? String(req.body.username || '').trim().toLowerCase()
+        : existing.username;
+    const role = (req.body?.role as AuthRole | undefined) || existing.role;
+    const password = req.body?.password !== undefined ? String(req.body.password || '') : '';
+
+    if (!name || !username) {
+      return res.status(400).json({ error: 'Name and username are required' });
+    }
+    if (!AUTH_ROLES.includes(role)) {
+      return res.status(400).json({ error: 'Invalid role' });
+    }
+    // Staff management: Authorizer may keep Authorizer accounts, but cannot demote self
+    if (existing.id === req.auth!.userId && role !== 'Authorizer') {
+      return res.status(403).json({ error: 'You cannot change your own Authorizer role' });
+    }
+    // Do not allow creating extra Authorizers via edit of Tester/Reviewer unless already Authorizer
+    if (role === 'Authorizer' && existing.role !== 'Authorizer') {
+      return res.status(403).json({ error: 'Cannot promote staff to Authorizer from this screen' });
+    }
+    if (password && password.length < 4) {
+      return res.status(400).json({ error: 'Password must be at least 4 characters' });
+    }
+
+    if (username !== existing.username) {
+      const clash = await findUserByUsername(username);
+      if (clash && clash.id !== existing.id) {
+        return res.status(409).json({ error: 'Username already exists' });
+      }
+    }
+
+    const patch: Partial<Pick<AuthUser, 'name' | 'username' | 'role' | 'passwordHash'>> = {
+      name,
+      username,
+      role,
+    };
+    if (password) {
+      patch.passwordHash = await hashPassword(password);
+    }
+
+    const updated = await updateUserById(existing.id, patch);
+    if (!updated) return res.status(404).json({ error: 'User not found' });
+    return res.json({ user: toPublicUser(updated) });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: 'Failed to update user' });
+  }
+});
+
+api.delete('/users/:userId', requireAuth, async (req: AuthedRequest, res) => {
+  try {
+    if (req.userRole !== 'Admin_Authorized') {
+      return res.status(403).json({ error: 'Only Authorizers can delete staff' });
+    }
+
+    const existing = await findUserById(req.params.userId);
+    if (!existing) return res.status(404).json({ error: 'User not found' });
+
+    if (existing.id === req.auth!.userId) {
+      return res.status(403).json({ error: 'You cannot delete your own account' });
+    }
+    if (existing.role === 'Authorizer') {
+      const authorizerCount = await countUsersByRole('Authorizer');
+      if (authorizerCount <= 1) {
+        return res.status(403).json({ error: 'Cannot delete the last Authorizer account' });
+      }
+    }
+
+    const deleted = await deleteUserById(existing.id);
+    if (!deleted) return res.status(404).json({ error: 'User not found' });
+    return res.status(204).send();
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: 'Failed to delete user' });
+  }
 });
 
 api.get('/jobs', requireAuth, async (_req, res) => {

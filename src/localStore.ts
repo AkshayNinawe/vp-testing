@@ -468,6 +468,51 @@ export function listLocalUsers(): Array<Omit<LocalUser, 'password'>> {
   return loadLocalUsers().map(({ password: _password, ...user }) => user);
 }
 
+export function updateLocalUser(
+  userId: string,
+  patch: { name?: string; username?: string; role?: AuthRole; password?: string }
+): Omit<LocalUser, 'password'> {
+  const users = loadLocalUsers();
+  const idx = users.findIndex(u => u.id === userId);
+  if (idx < 0) throw new Error('User not found');
+
+  const existing = users[idx];
+  const username =
+    patch.username !== undefined ? patch.username.trim().toLowerCase() : existing.username;
+  if (username !== existing.username && users.some(u => u.username === username && u.id !== userId)) {
+    throw new Error('Username already exists');
+  }
+
+  const next: LocalUser = {
+    ...existing,
+    name: patch.name !== undefined ? patch.name.trim() : existing.name,
+    username,
+    role: patch.role || existing.role,
+    password: patch.password ? patch.password : existing.password,
+  };
+  users[idx] = next;
+  saveLocalUsers(users);
+  const { password: _password, ...publicUser } = next;
+  return publicUser;
+}
+
+export function deleteLocalUser(userId: string, actorId?: string): boolean {
+  const users = loadLocalUsers();
+  const existing = users.find(u => u.id === userId);
+  if (!existing) return false;
+  if (actorId && existing.id === actorId) {
+    throw new Error('You cannot delete your own account');
+  }
+  if (existing.role === 'Authorizer') {
+    const authorizerCount = users.filter(u => u.role === 'Authorizer').length;
+    if (authorizerCount <= 1) {
+      throw new Error('Cannot delete the last Authorizer account');
+    }
+  }
+  saveLocalUsers(users.filter(u => u.id !== userId));
+  return true;
+}
+
 const NOTIFICATIONS_KEY = 'volttrack_local_notifications_v1';
 
 export type AppNotification = {

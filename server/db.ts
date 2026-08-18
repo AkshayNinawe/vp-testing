@@ -74,6 +74,33 @@ export async function countUsersByRole(role: AuthUser['role']): Promise<number> 
   return users().countDocuments({ role });
 }
 
+export async function listUsers(): Promise<AuthUser[]> {
+  const docs = await users().find({}).sort({ createdAt: -1 }).toArray();
+  return docs.map(doc => stripMongoId(doc));
+}
+
+export async function updateUserById(
+  userId: string,
+  patch: Partial<Pick<AuthUser, 'name' | 'username' | 'role' | 'passwordHash'>>
+): Promise<AuthUser | null> {
+  const existing = await findUserById(userId);
+  if (!existing) return null;
+  const next: AuthUser = {
+    ...existing,
+    ...patch,
+    id: existing.id,
+    createdAt: existing.createdAt,
+  };
+  const result = await users().replaceOne({ id: userId }, { ...next });
+  if (result.matchedCount === 0) return null;
+  return next;
+}
+
+export async function deleteUserById(userId: string): Promise<boolean> {
+  const result = await users().deleteOne({ id: userId });
+  return result.deletedCount > 0;
+}
+
 export async function listJobs(): Promise<Job[]> {
   const docs = await jobs().find({}).sort({ createdAt: -1 }).toArray();
   return docs.map(doc => stripMongoId(doc));

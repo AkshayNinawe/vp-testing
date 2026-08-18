@@ -39,6 +39,7 @@ export type AppView =
   | 'LOGIN'
   | 'DASHBOARD'
   | 'REGISTER_STAFF'
+  | 'STAFF_LIST'
   | 'SELECT_CAPACITY'
   | 'SELECT_TYPE'
   | 'NAME_JOB'

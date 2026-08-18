@@ -71,6 +71,26 @@ export const api = {
     return request<void>('/auth/logout', { method: 'POST' });
   },
 
+  listUsers() {
+    return request<{ users: PublicAuthUser[] }>('/users');
+  },
+
+  updateUser(
+    userId: string,
+    body: { name?: string; username?: string; role?: AuthRole; password?: string }
+  ) {
+    return request<{ user: PublicAuthUser }>(`/users/${userId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    });
+  },
+
+  deleteUser(userId: string) {
+    return request<void>(`/users/${userId}`, {
+      method: 'DELETE',
+    });
+  },
+
   listJobs() {
     return request<{ jobs: Job[] }>('/jobs');
   },

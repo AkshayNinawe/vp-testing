@@ -69,6 +69,16 @@ Roles: `Tester` | `Reviewer` | `Authorizer`
 - `PATCH /api/jobs/:jobId/tests/:testId/unaccept` (take back accepted offer if still Not Started)
 - `POST /api/jobs/:jobId/tests/accept-all`
 
+### Staff (Authorizer only)
+Powers the **Registered Staff** page (list / edit / delete) and Add Staff form.
+- `GET /api/users` → `{ users }` (public fields only; newest first)
+- `PATCH /api/users/:userId` `{ name?, username?, role?, password? }`
+  - Cannot demote yourself from Authorizer
+  - Cannot promote Tester/Reviewer to Authorizer here
+  - Password optional; if set, min 4 characters
+- `DELETE /api/users/:userId` (cannot delete self / last Authorizer)
+- `POST /api/auth/register` remains for creating Tester/Reviewer (and bootstrap Authorizer)
+
 ### Sign-off name lists (UI + server constants in `signOff.ts`)
 - Technicians: NITIN PATIL, PANKAJ KAWALE, AKASH PANCHESWAR, CHANCHALESH RABALE, ROHIT SONEWANE, RIPEKSHIT TUMBALE, ABHIJIT KHARKATE, HEMANT BHAGAT
 - Reviewers: GAURAV KUREKAR, KAPIL GAUTAM, HEMANT BHAGAT, PANKAJ KAWALE
