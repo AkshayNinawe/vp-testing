@@ -5561,7 +5561,27 @@ export default function App() {
     let cancelled = false;
 
     const boot = async () => {
-      if (isOfflineMode()) {
+      // Always probe the live API first. Sticky offline mode previously hid remote DB data.
+      let apiReachable = false;
+      try {
+        const status = await api.registrationStatus();
+        apiReachable = true;
+        if (!cancelled) {
+          setCanBootstrapAuthorizer(status.canBootstrapAuthorizer);
+          if (status.canBootstrapAuthorizer) {
+            setAuthRole('Authorizer');
+          } else {
+            setAuthMode('login');
+          }
+          // Clear sticky offline once server is reachable again
+          setOfflineMode(false);
+          setOfflineModeState(false);
+        }
+      } catch {
+        // API unreachable — fall back to offline only if previously enabled
+      }
+
+      if (!apiReachable && isOfflineMode()) {
         if (!cancelled) {
           setOfflineModeState(true);
           setCurrentUser({
@@ -5575,22 +5595,12 @@ export default function App() {
           setJobs(loadLocalJobs());
           setRoleNotifications(listNotificationsForRole('Authorizer'));
           setView('DASHBOARD');
+          setToast({
+            message: 'Server unreachable — showing offline data only. Use Logout then login when API is up.',
+            type: 'info',
+          });
         }
         return;
-      }
-
-      try {
-        const status = await api.registrationStatus();
-        if (!cancelled) {
-          setCanBootstrapAuthorizer(status.canBootstrapAuthorizer);
-          if (status.canBootstrapAuthorizer) {
-            setAuthRole('Authorizer');
-          } else {
-            setAuthMode('login');
-          }
-        }
-      } catch {
-        // API may be offline; keep default login UI
       }
 
       if (!api.getToken()) return;
@@ -6187,7 +6197,40 @@ ${PDF_PRINT_STYLES}
       return;
     }
 
-    // Prefer local accounts first so offline login doesn't spam API proxy errors
+    // Prefer remote API login so deployed DB data is used when the server is up.
+    if (!offlineMode && !isOfflineMode()) {
+      try {
+        const result = await api.login({ username, password, role: authRole });
+        api.setToken(result.token);
+        setOfflineMode(false);
+        setOfflineModeState(false);
+        setCurrentUser(result.user);
+        setCurrentRole(result.userRole);
+        setRoleNotifications(listNotificationsForRole(result.user.role));
+        const { jobs: remoteJobs } = await api.listJobs();
+        setJobs(remoteJobs);
+        resetAuthForm();
+        const unread = unreadNotificationCount(result.user.role);
+        setToast({
+          message:
+            unread > 0
+              ? `Logged in as ${result.user.name} (${result.user.role}) — ${unread} notification${unread === 1 ? '' : 's'}`
+              : `Logged in as ${result.user.name} (${result.user.role})`,
+          type: 'success',
+        });
+        setView('DASHBOARD');
+        return;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : `Invalid credentials for ${authRole}.`;
+        const network = isNetworkError(err) || msg === 'Failed to fetch';
+        if (!network) {
+          setAuthError(msg);
+          return;
+        }
+        // Fall through to local/offline login when API is unreachable
+      }
+    }
+
     const localUser = loginLocalUser({ username, password, role: authRole });
     if (localUser) {
       const { password: _pw, ...publicUser } = localUser;
@@ -6195,39 +6238,11 @@ ${PDF_PRINT_STYLES}
       return;
     }
 
-    if (offlineMode || isOfflineMode()) {
-      setAuthError('No local account found for that role. Use Authorizer → Skip for now, or Register Staff first.');
-      return;
-    }
-
-    try {
-      const result = await api.login({ username, password, role: authRole });
-      api.setToken(result.token);
-      setOfflineMode(false);
-      setOfflineModeState(false);
-      setCurrentUser(result.user);
-      setCurrentRole(result.userRole);
-      setRoleNotifications(listNotificationsForRole(result.user.role));
-      const { jobs: remoteJobs } = await api.listJobs();
-      setJobs(remoteJobs);
-      resetAuthForm();
-      const unread = unreadNotificationCount(result.user.role);
-      setToast({
-        message:
-          unread > 0
-            ? `Logged in as ${result.user.name} (${result.user.role}) — ${unread} notification${unread === 1 ? '' : 's'}`
-            : `Logged in as ${result.user.name} (${result.user.role})`,
-        type: 'success',
-      });
-      setView('DASHBOARD');
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : `Invalid credentials for ${authRole}.`;
-      setAuthError(
-        isNetworkError(err) || msg === 'Failed to fetch'
-          ? 'API offline. Use Authorizer → Skip for now, or login with a locally registered staff account.'
-          : msg
-      );
-    }
+    setAuthError(
+      offlineMode || isOfflineMode()
+        ? 'No local account found for that role. Use Authorizer → Skip for now, or Register Staff first.'
+        : 'API unreachable and no matching local account. Check https://vishwaspower.in/volttrack/api or use Skip for now.'
+    );
   };
 
   const handleRegister = async () => {
@@ -6268,7 +6283,7 @@ ${PDF_PRINT_STYLES}
       const msg = err instanceof Error ? err.message : 'Registration failed.';
       setAuthError(
         msg === 'Failed to fetch'
-          ? 'Cannot reach API. Confirm the backend is running for https://test.apivishvaspower.com (same-origin /api) or set VITE_API_URL.'
+          ? 'Cannot reach API at https://vishwaspower.in/volttrack/api. Confirm the VoltTrack backend is running or update VITE_API_URL.'
           : msg
       );
     }
@@ -9141,9 +9156,10 @@ ${PDF_PRINT_STYLES}
       </AnimatePresence>
 
       <div className="fixed bottom-4 left-4 flex items-center gap-4 text-[10px] font-mono text-industrial-text-muted uppercase tracking-[0.2em] opacity-40 hover:opacity-100 transition-opacity">
-        <div className="flex items-center gap-1.5">
-          <span className="w-2 h-2 rounded-full bg-green-500"></span> System Online
-        </div>
+          <div className={`flex items-center gap-1.5 ${offlineMode || isOfflineMode() ? 'text-amber-600' : ''}`}>
+            <span className={`w-2 h-2 rounded-full ${offlineMode || isOfflineMode() ? 'bg-amber-500' : 'bg-green-500'}`}></span>
+            {offlineMode || isOfflineMode() ? ' Offline Mode' : ' System Online'}
+          </div>
         <div className="h-3 w-px bg-industrial-border"></div>
         <div>V.2.4.0-CORE</div>
       </div>

@@ -19,7 +19,7 @@
 
 ### Production
 - Frontend: https://test.apivishvaspower.com/
-- API: same origin `/api` (reverse-proxy to Express). Set `CORS_ORIGINS` / `APP_URL` on the server (see `server/.env.example`).
+- API: https://vishwaspower.in/volttrack/api (`VITE_API_URL=https://vishwaspower.in/volttrack`)
 
 Or separately:
 - `npm run dev:server` — API only
