@@ -15,10 +15,17 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   };
   if (token) headers.Authorization = `Bearer ${token}`;
 
-  const res = await fetch(`${API_BASE}/api${path}`, {
-    ...options,
-    headers,
-  });
+  const url = `${API_BASE}/api${path}`;
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      ...options,
+      headers,
+    });
+  } catch {
+    const where = API_BASE || '(same-origin)';
+    throw new Error(`Cannot reach API at ${where}/api. Confirm the VoltTrack backend is running.`);
+  }
 
   if (res.status === 204) {
     return undefined as T;
@@ -128,7 +135,7 @@ export const api = {
   updateStage(
     jobId: string,
     testId: string,
-    body: { stage: TestStage; action?: 'promote' | 'reject' }
+    body: { stage: TestStage; action?: 'promote' | 'reject'; note?: string }
   ) {
     return request<{ job: Job; openTestId?: string | null }>(
       `/jobs/${jobId}/tests/${testId}/stage`,

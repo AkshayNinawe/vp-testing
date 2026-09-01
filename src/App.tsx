@@ -45,30 +45,13 @@ import { calculateFinalLvScImpedanceZ, getFinalLvWindingResMaxGuaranteed, seedFi
 import { applyHVLLCalculations, getHVLLConfig, getHVNllGuaranteedCurrent, getHVNllGuaranteedPower, seedHVTestListDefaults } from './hvTestListConfig';
 import { api } from './api';
 import {
-  acceptAllLocalTests,
-  acceptLocalTest,
-  authRoleToUserRole,
-  createLocalJob,
-  deleteLocalJob,
+  clearLegacyLocalData,
   isNetworkError,
-  isOfflineMode,
   listNotificationsForRole,
-  loadLocalJobs,
-  loginLocalUser,
   markAllNotificationsRead,
   markNotificationRead,
   pushNotification,
-  registerLocalUser,
-  listLocalUsers,
-  updateLocalUser,
-  deleteLocalUser,
-  saveLocalJobs,
-  setOfflineMode,
-  unacceptLocalTest,
   unreadNotificationCount,
-  updateLocalObservation,
-  updateLocalRating,
-  updateLocalStage,
   type AppNotification,
 } from './localStore';
 
@@ -563,9 +546,36 @@ const getSelectedAuthorizer = (test: TransformerTest) => {
   return String(test.observationData?.[key] || '').trim();
 };
 
+const getRejectionNote = (test: TransformerTest) =>
+  String(test.observationData?.rejection_note || '').trim();
+
+const getRejectionMeta = (test: TransformerTest) => {
+  const note = getRejectionNote(test);
+  if (!note) return null;
+  return {
+    note,
+    by: String(test.observationData?.rejection_by || '').trim() || 'Unknown',
+    at: String(test.observationData?.rejection_at || '').trim(),
+    fromStage: String(test.observationData?.rejection_from_stage || '').trim(),
+    toStage: String(test.observationData?.rejection_to_stage || '').trim(),
+  };
+};
+
 /** Completed only after Authorizer selected someone and approved (Authorized). */
 const isTestCompleted = (test: TransformerTest) =>
   test.stage === 'Authorized' && !!getSelectedAuthorizer(test);
+
+/** HV Testing reports stay Reviewer-locked after Authorizer approval. */
+const isHvTestingReport = (test: { name: string }) =>
+  test.name.trim().toUpperCase() === 'LIST OF HV TEST';
+
+/**
+ * Report open/view lock by role + stage.
+ * After Authorizer approval, Reviewers may view all reports except HV Testing.
+ */
+const isReportLockedForRole = (role: UserRole, test: TransformerTest) =>
+  (role === 'Admin_Tested' && (test.stage === 'Reviewed' || test.stage === 'Authorized')) ||
+  (role === 'Admin_Reviewed' && test.stage === 'Authorized' && isHvTestingReport(test));
 
 const FormContext = createContext<{
   data: Record<string, string>;
@@ -5497,7 +5507,6 @@ export default function App() {
   const [authRole, setAuthRole] = useState<AuthRole>('Tester');
   const [authError, setAuthError] = useState('');
   const [canBootstrapAuthorizer, setCanBootstrapAuthorizer] = useState(false);
-  const [offlineMode, setOfflineModeState] = useState(() => isOfflineMode());
   const [editingTestId, setEditingTestId] = useState<string | null>(null);
   const [staffRole, setStaffRole] = useState<AuthRole>('Tester');
   const [staffName, setStaffName] = useState('');
@@ -5535,11 +5544,6 @@ export default function App() {
     }
   };
 
-  const enableOfflineMode = (jobsToLoad = true) => {
-    setOfflineMode(true);
-    setOfflineModeState(true);
-    if (jobsToLoad) setJobs(loadLocalJobs());
-  };
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<JobStatus>('Processing');
   const [filterCapacity, setFilterCapacity] = useState<string>('All');
@@ -5556,16 +5560,14 @@ export default function App() {
   }>({});
   const [jobName, setJobName] = useState('');
 
-  // Restore session + load jobs from API
+  // Restore session + load jobs from API (backend only — no offline/localStorage jobs)
   useEffect(() => {
     let cancelled = false;
+    clearLegacyLocalData();
 
     const boot = async () => {
-      // Always probe the live API first. Sticky offline mode previously hid remote DB data.
-      let apiReachable = false;
       try {
         const status = await api.registrationStatus();
-        apiReachable = true;
         if (!cancelled) {
           setCanBootstrapAuthorizer(status.canBootstrapAuthorizer);
           if (status.canBootstrapAuthorizer) {
@@ -5573,34 +5575,13 @@ export default function App() {
           } else {
             setAuthMode('login');
           }
-          // Clear sticky offline once server is reachable again
-          setOfflineMode(false);
-          setOfflineModeState(false);
         }
       } catch {
-        // API unreachable — fall back to offline only if previously enabled
-      }
-
-      if (!apiReachable && isOfflineMode()) {
         if (!cancelled) {
-          setOfflineModeState(true);
-          setCurrentUser({
-            id: 'local-skip-authorizer',
-            name: 'Authorizer (Skipped)',
-            username: 'authorizer-skip',
-            role: 'Authorizer',
-            createdAt: Date.now(),
-          });
-          setCurrentRole('Admin_Authorized');
-          setJobs(loadLocalJobs());
-          setRoleNotifications(listNotificationsForRole('Authorizer'));
-          setView('DASHBOARD');
-          setToast({
-            message: 'Server unreachable — showing offline data only. Use Logout then login when API is up.',
-            type: 'info',
-          });
+          setAuthError(
+            'Cannot reach API. Confirm the VoltTrack backend is running at the configured VITE_API_URL.'
+          );
         }
-        return;
       }
 
       if (!api.getToken()) return;
@@ -5629,15 +5610,11 @@ export default function App() {
   }, []);
 
   const upsertJob = (job: Job) => {
-    setJobs(prev => {
-      const next = prev.some(j => j.id === job.id)
+    setJobs(prev =>
+      prev.some(j => j.id === job.id)
         ? prev.map(j => (j.id === job.id ? job : j))
-        : [job, ...prev];
-      if (offlineMode || isOfflineMode()) {
-        saveLocalJobs(next);
-      }
-      return next;
-    });
+        : [job, ...prev]
+    );
   };
 
   const observationSaveTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
@@ -5649,6 +5626,13 @@ export default function App() {
     testId: string;
     testName: string;
     step: 1 | 2;
+  } | null>(null);
+  const [rejectConfirm, setRejectConfirm] = useState<{
+    jobId: string;
+    testId: string;
+    testName: string;
+    targetStage: TestStage;
+    note: string;
   } | null>(null);
 
   useEffect(() => {
@@ -6170,25 +6154,6 @@ ${PDF_PRINT_STYLES}
     setAuthError('');
   };
 
-  const completeLocalLogin = (user: { id: string; name: string; username: string; role: AuthRole; createdAt: number }) => {
-    api.setToken(null);
-    setCurrentUser(user);
-    setCurrentRole(authRoleToUserRole(user.role));
-    enableOfflineMode(true);
-    setRoleNotifications(listNotificationsForRole(user.role));
-    resetAuthForm();
-    setAuthError('');
-    setView('DASHBOARD');
-    const unread = unreadNotificationCount(user.role);
-    setToast({
-      message:
-        unread > 0
-          ? `Logged in as ${user.name} (${user.role}) — ${unread} notification${unread === 1 ? '' : 's'}`
-          : `Logged in as ${user.name} (${user.role}) — offline`,
-      type: 'success',
-    });
-  };
-
   const handleLogin = async () => {
     const username = authUsername.trim().toLowerCase();
     const password = authPassword;
@@ -6197,60 +6162,58 @@ ${PDF_PRINT_STYLES}
       return;
     }
 
-    // Prefer remote API login so deployed DB data is used when the server is up.
-    if (!offlineMode && !isOfflineMode()) {
-      try {
-        const result = await api.login({ username, password, role: authRole });
-        api.setToken(result.token);
-        setOfflineMode(false);
-        setOfflineModeState(false);
-        setCurrentUser(result.user);
-        setCurrentRole(result.userRole);
-        setRoleNotifications(listNotificationsForRole(result.user.role));
-        const { jobs: remoteJobs } = await api.listJobs();
-        setJobs(remoteJobs);
-        resetAuthForm();
-        const unread = unreadNotificationCount(result.user.role);
-        setToast({
-          message:
-            unread > 0
-              ? `Logged in as ${result.user.name} (${result.user.role}) — ${unread} notification${unread === 1 ? '' : 's'}`
-              : `Logged in as ${result.user.name} (${result.user.role})`,
-          type: 'success',
-        });
-        setView('DASHBOARD');
-        return;
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : `Invalid credentials for ${authRole}.`;
-        const network = isNetworkError(err) || msg === 'Failed to fetch';
-        if (!network) {
-          setAuthError(msg);
-          return;
-        }
-        // Fall through to local/offline login when API is unreachable
-      }
+    try {
+      const result = await api.login({ username, password, role: authRole });
+      api.setToken(result.token);
+      setCurrentUser(result.user);
+      setCurrentRole(result.userRole);
+      setRoleNotifications(listNotificationsForRole(result.user.role));
+      const { jobs: remoteJobs } = await api.listJobs();
+      setJobs(remoteJobs);
+      resetAuthForm();
+      const unread = unreadNotificationCount(result.user.role);
+      setToast({
+        message:
+          unread > 0
+            ? `Logged in as ${result.user.name} (${result.user.role}) — ${unread} notification${unread === 1 ? '' : 's'}`
+            : `Logged in as ${result.user.name} (${result.user.role})`,
+        type: 'success',
+      });
+      setView('DASHBOARD');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : `Invalid credentials for ${authRole}.`;
+      setAuthError(
+        isNetworkError(err) || msg === 'Failed to fetch'
+          ? 'Cannot reach API. Confirm the VoltTrack backend is running, then try again.'
+          : msg
+      );
     }
+  };
 
-    const localUser = loginLocalUser({ username, password, role: authRole });
-    if (localUser) {
-      const { password: _pw, ...publicUser } = localUser;
-      completeLocalLogin(publicUser);
-      return;
-    }
-
-    setAuthError(
-      offlineMode || isOfflineMode()
-        ? 'No local account found for that role. Use Authorizer → Skip for now, or Register Staff first.'
-        : 'API unreachable and no matching local account. Check https://vishwaspower.in/volttrack/api or use Skip for now.'
-    );
+  const handleSkipAuthorizerLogin = () => {
+    api.setToken(null);
+    clearLegacyLocalData();
+    setCurrentUser({
+      id: 'local-skip-authorizer',
+      name: 'Authorizer (Skipped)',
+      username: 'authorizer-skip',
+      role: 'Authorizer',
+      createdAt: Date.now(),
+    });
+    setCurrentRole('Admin_Authorized');
+    setJobs([]);
+    setAuthError('');
+    resetAuthForm();
+    setAuthRole('Authorizer');
+    setRoleNotifications(listNotificationsForRole('Authorizer'));
+    setView('DASHBOARD');
+    setToast({
+      message: 'Continued as Authorizer without login. Log in to load and save jobs from the backend.',
+      type: 'info',
+    });
   };
 
   const handleRegister = async () => {
-    if (!canBootstrapAuthorizer) {
-      setAuthError('Only an Authorizer can register Tester and Reviewer accounts.');
-      return;
-    }
-
     const name = authName.trim();
     const username = authUsername.trim().toLowerCase();
     const password = authPassword;
@@ -6270,6 +6233,18 @@ ${PDF_PRINT_STYLES}
     }
 
     try {
+      // Refresh bootstrap status so we don't submit when an Authorizer already exists.
+      const status = await api.registrationStatus();
+      setCanBootstrapAuthorizer(status.canBootstrapAuthorizer);
+      if (!status.canBootstrapAuthorizer) {
+        setAuthMode('login');
+        setAuthRole('Authorizer');
+        setAuthError(
+          'An Authorizer already exists. Please Login with Authorizer credentials. After login, use Registered Staff to create Tester/Reviewer accounts.'
+        );
+        return;
+      }
+
       await api.register({ name, username, password, role: 'Authorizer' });
       setCanBootstrapAuthorizer(false);
       setAuthMode('login');
@@ -6281,32 +6256,11 @@ ${PDF_PRINT_STYLES}
       setToast({ message: 'Authorizer account registered. Please login.', type: 'success' });
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Registration failed.';
-      setAuthError(
-        msg === 'Failed to fetch'
-          ? 'Cannot reach API at https://vishwaspower.in/volttrack/api. Confirm the VoltTrack backend is running or update VITE_API_URL.'
-          : msg
-      );
+      setAuthError(msg);
     }
   };
 
-  const handleSkipAuthorizerLogin = () => {
-    setCurrentUser({
-      id: 'local-skip-authorizer',
-      name: 'Authorizer (Skipped)',
-      username: 'authorizer-skip',
-      role: 'Authorizer',
-      createdAt: Date.now(),
-    });
-    setCurrentRole('Admin_Authorized');
-    setAuthError('');
-    resetAuthForm();
-    enableOfflineMode(true);
-    setRoleNotifications(listNotificationsForRole('Authorizer'));
-    setView('DASHBOARD');
-    setToast({ message: 'Offline mode: jobs save in this browser only', type: 'info' });
-  };
-
-  const finishStaffRegistration = (role: AuthRole, offline: boolean) => {
+  const finishStaffRegistration = (role: AuthRole) => {
     setStaffName('');
     setStaffUsername('');
     setStaffPassword('');
@@ -6314,9 +6268,7 @@ ${PDF_PRINT_STYLES}
     setStaffError('');
     setEditingStaffId(null);
     setToast({
-      message: offline
-        ? `${role} account registered offline. They can login with that role.`
-        : `${role} account registered.`,
+      message: `${role} account registered.`,
       type: 'success',
     });
     void loadStaffList();
@@ -6328,18 +6280,10 @@ ${PDF_PRINT_STYLES}
       setStaffList([]);
       return;
     }
-    if (offlineMode || isOfflineMode()) {
-      setStaffList(listLocalUsers());
-      return;
-    }
     try {
       const { users } = await api.listUsers();
       setStaffList(users);
     } catch (err) {
-      if (isNetworkError(err)) {
-        setStaffList(listLocalUsers());
-        return;
-      }
       setToast({
         message: err instanceof Error ? err.message : 'Failed to load staff',
         type: 'error',
@@ -6414,19 +6358,6 @@ ${PDF_PRINT_STYLES}
         ...(password ? { password } : {}),
       };
 
-      if (offlineMode || isOfflineMode()) {
-        try {
-          updateLocalUser(editing.id, body);
-          setToast({ message: 'Staff account updated (offline).', type: 'success' });
-          resetStaffForm();
-          await loadStaffList();
-          setView('STAFF_LIST');
-        } catch (err) {
-          setStaffError(err instanceof Error ? err.message : 'Update failed.');
-        }
-        return;
-      }
-
       try {
         await api.updateUser(editing.id, body);
         setToast({ message: 'Staff account updated.', type: 'success' });
@@ -6434,19 +6365,6 @@ ${PDF_PRINT_STYLES}
         await loadStaffList();
         setView('STAFF_LIST');
       } catch (err) {
-        if (isNetworkError(err)) {
-          try {
-            updateLocalUser(editing.id, body);
-            setToast({ message: 'Staff account updated offline.', type: 'success' });
-            resetStaffForm();
-            await loadStaffList();
-            setView('STAFF_LIST');
-            return;
-          } catch (localErr) {
-            setStaffError(localErr instanceof Error ? localErr.message : 'Update failed.');
-            return;
-          }
-        }
         setStaffError(err instanceof Error ? err.message : 'Update failed.');
       }
       return;
@@ -6455,35 +6373,12 @@ ${PDF_PRINT_STYLES}
 
   const handleDeleteStaff = async (user: AuthUser) => {
     if (currentUser?.role !== 'Authorizer') return;
-    if (offlineMode || isOfflineMode()) {
-      try {
-        deleteLocalUser(user.id, currentUser.id);
-        setDeleteStaffConfirm(null);
-        setToast({ message: `${user.name} deleted.`, type: 'success' });
-        await loadStaffList();
-      } catch (err) {
-        setToast({ message: err instanceof Error ? err.message : 'Delete failed.', type: 'error' });
-      }
-      return;
-    }
     try {
       await api.deleteUser(user.id);
       setDeleteStaffConfirm(null);
       setToast({ message: `${user.name} deleted.`, type: 'success' });
       await loadStaffList();
     } catch (err) {
-      if (isNetworkError(err)) {
-        try {
-          deleteLocalUser(user.id, currentUser.id);
-          setDeleteStaffConfirm(null);
-          setToast({ message: `${user.name} deleted offline.`, type: 'success' });
-          await loadStaffList();
-          return;
-        } catch (localErr) {
-          setToast({ message: localErr instanceof Error ? localErr.message : 'Delete failed.', type: 'error' });
-          return;
-        }
-      }
       setToast({ message: err instanceof Error ? err.message : 'Delete failed.', type: 'error' });
     }
   };
@@ -6516,33 +6411,16 @@ ${PDF_PRINT_STYLES}
       return;
     }
 
-    if (offlineMode || isOfflineMode()) {
-      try {
-        registerLocalUser({ name, username, password, role: staffRole });
-        finishStaffRegistration(staffRole, true);
-      } catch (err) {
-        setStaffError(err instanceof Error ? err.message : 'Registration failed.');
-      }
-      return;
-    }
-
     try {
       await api.register({ name, username, password, role: staffRole });
-      finishStaffRegistration(staffRole, false);
+      finishStaffRegistration(staffRole);
     } catch (err) {
-      if (isNetworkError(err) || (err instanceof Error && /failed to fetch|request failed/i.test(err.message))) {
-        try {
-          enableOfflineMode(false);
-          registerLocalUser({ name, username, password, role: staffRole });
-          finishStaffRegistration(staffRole, true);
-          return;
-        } catch (localErr) {
-          setStaffError(localErr instanceof Error ? localErr.message : 'Registration failed.');
-          return;
-        }
-      }
       const msg = err instanceof Error ? err.message : 'Registration failed.';
-      setStaffError(msg);
+      setStaffError(
+        isNetworkError(err) || /failed to fetch|request failed/i.test(msg)
+          ? 'Cannot reach API. Staff registration requires the backend.'
+          : msg
+      );
     }
   };
 
@@ -6550,11 +6428,10 @@ ${PDF_PRINT_STYLES}
     if (currentUser?.role === 'Authorizer' && (view === 'STAFF_LIST' || view === 'REGISTER_STAFF')) {
       void loadStaffList();
     }
-  }, [currentUser?.role, view, offlineMode]);
+  }, [currentUser?.role, view]);
 
   const handleLogout = async () => {
-    // Skip remote logout when offline to avoid noisy proxy errors
-    if (!offlineMode && !isOfflineMode() && api.getToken()) {
+    if (api.getToken()) {
       try {
         await api.logout();
       } catch {
@@ -6562,8 +6439,7 @@ ${PDF_PRINT_STYLES}
       }
     }
     api.setToken(null);
-    setOfflineMode(false);
-    setOfflineModeState(false);
+    clearLegacyLocalData();
     setCurrentUser(null);
     setCurrentRole('Admin_Tested');
     setJobs([]);
@@ -6594,42 +6470,6 @@ ${PDF_PRINT_STYLES}
       : `V/M/${jobName.trim().replace(/^V\/M\/?/i, '')}`;
     if (!normalizedName || normalizedName === 'V/M/' || !currentSelection.type || !currentSelection.capacity) return;
 
-    const finishCreatedJob = (job: Job) => {
-      let nextJob = job;
-      if (job.type === 'Auto' && (job.capacity === '12.3MVA' || job.capacity === '16.5MVA')) {
-        const ctTest = job.tests.find(t => t.name === 'CT TEST');
-        if (ctTest) {
-          const seeded = seedCTNameplateDefaults({}, job.type, job.capacity);
-          if (offlineMode || isOfflineMode()) {
-            const updated = updateLocalObservation(job.id, ctTest.id, seeded);
-            if (updated) nextJob = updated.job;
-          } else {
-            nextJob = { ...job, tests: job.tests.map(t => (t.id === ctTest.id ? { ...t, observationData: seeded } : t)) };
-          }
-        }
-      }
-      upsertJob(nextJob);
-      setView('JOB_LIST');
-      setCurrentSelection({});
-      setJobName('');
-      setToast({
-        message: offlineMode || isOfflineMode()
-          ? `Job ${nextJob.name} created (offline)`
-          : `Job ${nextJob.name} created`,
-        type: 'success',
-      });
-    };
-
-    if (offlineMode || isOfflineMode()) {
-      const job = createLocalJob({
-        name: normalizedName,
-        type: currentSelection.type,
-        capacity: currentSelection.capacity,
-      });
-      finishCreatedJob(job);
-      return;
-    }
-
     try {
       const { job } = await api.createJob({
         name: normalizedName,
@@ -6655,16 +6495,6 @@ ${PDF_PRINT_STYLES}
       setJobName('');
       setToast({ message: `Job ${job.name} created`, type: 'success' });
     } catch (err) {
-      if (isNetworkError(err)) {
-        enableOfflineMode(false);
-        const job = createLocalJob({
-          name: normalizedName,
-          type: currentSelection.type!,
-          capacity: currentSelection.capacity!,
-        });
-        finishCreatedJob(job);
-        return;
-      }
       setToast({
         message: err instanceof Error ? err.message : 'Failed to create job',
         type: 'error',
@@ -6748,21 +6578,6 @@ ${PDF_PRINT_STYLES}
       }
     };
 
-    if (offlineMode || isOfflineMode()) {
-      const result = updateLocalStage(jobId, testId, targetStage, 'promote');
-      if (!result) {
-        setToast({ message: 'Job or test not found', type: 'error' });
-        return false;
-      }
-      upsertJob(result.job);
-      emitStageNotifications(result.job);
-      if (result.openTestId) {
-        setEditingTestId(result.openTestId);
-        setView('TEST_REPORT');
-      }
-      return true;
-    }
-
     try {
       const { job: updatedJob, openTestId } = await api.updateStage(jobId, testId, {
         stage: targetStage,
@@ -6776,19 +6591,6 @@ ${PDF_PRINT_STYLES}
       }
       return true;
     } catch (err) {
-      if (isNetworkError(err)) {
-        enableOfflineMode(false);
-        const result = updateLocalStage(jobId, testId, targetStage, 'promote');
-        if (result) {
-          upsertJob(result.job);
-          emitStageNotifications(result.job);
-          if (result.openTestId) {
-            setEditingTestId(result.openTestId);
-            setView('TEST_REPORT');
-          }
-          return true;
-        }
-      }
       setToast({
         message: err instanceof Error ? err.message : 'Stage update failed',
         type: 'error',
@@ -6797,25 +6599,57 @@ ${PDF_PRINT_STYLES}
     }
   };
 
-  const handleRejectTestStage = async (jobId: string, testId: string, targetStage: TestStage) => {
-    if (offlineMode || isOfflineMode()) {
-      const result = updateLocalStage(jobId, testId, targetStage, 'reject');
-      if (!result) {
-        setToast({ message: 'Job or test not found', type: 'error' });
-        return;
-      }
-      upsertJob(result.job);
-      setToast({ message: `Rejected to ${targetStage}`, type: 'info' });
+  const openRejectConfirm = (jobId: string, testId: string, targetStage: TestStage) => {
+    const sourceJob = jobs.find(j => j.id === jobId);
+    const sourceTest = sourceJob?.tests.find(t => t.id === testId);
+    setRejectConfirm({
+      jobId,
+      testId,
+      testName: sourceTest?.name || 'this test',
+      targetStage,
+      note: '',
+    });
+  };
+
+  const handleRejectTestStage = async (jobId: string, testId: string, targetStage: TestStage, note: string) => {
+    const trimmedNote = note.trim();
+    if (!trimmedNote) {
+      setToast({ message: 'Please add a rejection note before rejecting.', type: 'error' });
       return;
     }
+
+    const sourceJob = jobs.find(j => j.id === jobId);
+    const sourceTest = sourceJob?.tests.find(t => t.id === testId);
+    const actor = currentUser?.name || currentAuthRole;
 
     try {
       const { job } = await api.updateStage(jobId, testId, {
         stage: targetStage,
         action: 'reject',
+        note: trimmedNote,
       });
       upsertJob(job);
-      setToast({ message: `Rejected to ${targetStage}`, type: 'info' });
+      setRejectConfirm(null);
+
+      const updatedTest = job.tests.find(t => t.id === testId) || sourceTest;
+      const notifyTarget: AuthRole | null =
+        targetStage === 'Tested' ? 'Tester' : targetStage === 'Reviewed' ? 'Reviewer' : null;
+
+      if (notifyTarget && updatedTest) {
+        notifyRole(
+          notifyTarget,
+          'Test rejected',
+          `${actor} rejected "${updatedTest.name}" on job ${job.name} back to ${targetStage}. Note: ${trimmedNote}`,
+          { jobId: job.id, testId: updatedTest.id },
+          false
+        );
+      }
+
+      setToast({
+        message: `Rejected to ${targetStage}. ${notifyTarget || 'Next role'} notified.`,
+        type: 'info',
+      });
+      setView('JOB_DETAIL');
     } catch (err) {
       setToast({
         message: err instanceof Error ? err.message : 'Reject failed',
@@ -6844,22 +6678,10 @@ ${PDF_PRINT_STYLES}
       });
     };
 
-    if (offlineMode || isOfflineMode()) {
-      const job = acceptLocalTest(jobId, testId);
-      if (job) afterAccept(job);
-      return;
-    }
-
     try {
       const { job } = await api.acceptTest(jobId, testId);
       afterAccept(job);
     } catch (err) {
-      if (isNetworkError(err)) {
-        enableOfflineMode(false);
-        const job = acceptLocalTest(jobId, testId);
-        if (job) afterAccept(job);
-        return;
-      }
       setToast({
         message: err instanceof Error ? err.message : 'Accept failed',
         type: 'error',
@@ -6897,36 +6719,10 @@ ${PDF_PRINT_STYLES}
       });
     };
 
-    if (offlineMode || isOfflineMode()) {
-      const job = unacceptLocalTest(jobId, testId);
-      if (!job) {
-        setToast({
-          message: 'Cannot take back offer after testing has started.',
-          type: 'error',
-        });
-        return;
-      }
-      afterUnaccept(job);
-      return;
-    }
-
     try {
       const { job } = await api.unacceptTest(jobId, testId);
       afterUnaccept(job);
     } catch (err) {
-      if (isNetworkError(err)) {
-        enableOfflineMode(false);
-        const job = unacceptLocalTest(jobId, testId);
-        if (!job) {
-          setToast({
-            message: 'Cannot take back offer after testing has started.',
-            type: 'error',
-          });
-          return;
-        }
-        afterUnaccept(job);
-        return;
-      }
       setToast({
         message: err instanceof Error ? err.message : 'Failed to take back offer',
         type: 'error',
@@ -6956,29 +6752,10 @@ ${PDF_PRINT_STYLES}
       });
     };
 
-    if (offlineMode || isOfflineMode()) {
-      if (!deleteLocalJob(jobId)) {
-        setToast({ message: 'Job not found', type: 'error' });
-        return;
-      }
-      afterDelete();
-      return;
-    }
-
     try {
       await api.deleteJob(jobId);
-      deleteLocalJob(jobId);
       afterDelete();
     } catch (err) {
-      if (isNetworkError(err)) {
-        enableOfflineMode(false);
-        if (!deleteLocalJob(jobId)) {
-          setToast({ message: 'Job not found', type: 'error' });
-          return;
-        }
-        afterDelete();
-        return;
-      }
       setToast({
         message: err instanceof Error ? err.message : 'Failed to delete job',
         type: 'error',
@@ -7004,22 +6781,10 @@ ${PDF_PRINT_STYLES}
       });
     };
 
-    if (offlineMode || isOfflineMode()) {
-      const job = acceptAllLocalTests(jobId);
-      if (job) afterAcceptAll(job);
-      return;
-    }
-
     try {
       const { job } = await api.acceptAllTests(jobId);
       afterAcceptAll(job);
     } catch (err) {
-      if (isNetworkError(err)) {
-        enableOfflineMode(false);
-        const job = acceptAllLocalTests(jobId);
-        if (job) afterAcceptAll(job);
-        return;
-      }
       setToast({
         message: err instanceof Error ? err.message : 'Accept all failed',
         type: 'error',
@@ -7028,6 +6793,53 @@ ${PDF_PRINT_STYLES}
   };
 
   const handleUpdateTestData = async (jobId: string, testId: string, data: Record<string, string>) => {
+    const sourceJob = jobs.find(j => j.id === jobId);
+    const sourceTest = sourceJob?.tests.find(t => t.id === testId);
+    const previous = sourceTest?.observationData || {};
+
+    // Notify next role when Tester / Reviewer completes their sign-off selection.
+    if (sourceJob && sourceTest) {
+      const techKey = getTechnicianFieldKey(sourceTest.name);
+      const revKey = getReviewerFieldKey(sourceTest.name);
+      const prevTech = String(previous[techKey] || '').trim();
+      const nextTech = String(data[techKey] || '').trim();
+      const prevRev = String(previous[revKey] || '').trim();
+      const nextRev = String(data[revKey] || '').trim();
+      const actor = currentUser?.name || currentAuthRole;
+
+      if (nextTech && nextTech !== prevTech) {
+        notifyRole(
+          'Reviewer',
+          'Report signed by Tester',
+          `${actor} signed "${sourceTest.name}" on job ${sourceJob.name}${nextTech ? ` (Technician: ${nextTech})` : ''}. Ready for review.`,
+          { jobId: sourceJob.id, testId: sourceTest.id },
+          false
+        );
+        if (currentAuthRole === 'Reviewer') {
+          setToast({
+            message: `Tester signed "${sourceTest.name}" on ${sourceJob.name}`,
+            type: 'info',
+          });
+        }
+      }
+
+      if (nextRev && nextRev !== prevRev) {
+        notifyRole(
+          'Authorizer',
+          'Report signed by Reviewer',
+          `${actor} signed "${sourceTest.name}" on job ${sourceJob.name}${nextRev ? ` (Reviewer: ${nextRev})` : ''}. Ready for authorization.`,
+          { jobId: sourceJob.id, testId: sourceTest.id },
+          false
+        );
+        if (currentAuthRole === 'Authorizer') {
+          setToast({
+            message: `Reviewer signed "${sourceTest.name}" on ${sourceJob.name}`,
+            type: 'info',
+          });
+        }
+      }
+    }
+
     setJobs(prev => prev.map(job => {
       if (job.id !== jobId) return job;
       return {
@@ -7045,21 +6857,10 @@ ${PDF_PRINT_STYLES}
       clearTimeout(observationSaveTimers.current[key]);
     }
     observationSaveTimers.current[key] = setTimeout(async () => {
-      if (offlineMode || isOfflineMode()) {
-        const updated = updateLocalObservation(jobId, testId, data);
-        if (updated) upsertJob(updated.job);
-        return;
-      }
       try {
         const { job } = await api.updateObservation(jobId, testId, data);
         upsertJob(job);
       } catch (err) {
-        if (isNetworkError(err)) {
-          enableOfflineMode(false);
-          const updated = updateLocalObservation(jobId, testId, data);
-          if (updated) upsertJob(updated.job);
-          return;
-        }
         setToast({
           message: err instanceof Error ? err.message : 'Failed to save observations',
           type: 'error',
@@ -7069,26 +6870,12 @@ ${PDF_PRINT_STYLES}
   };
 
   const handleUpdateJobRating = async (jobId: string, data: Record<string, string>) => {
-    setJobs(prev => {
-      const next = prev.map(job => (job.id === jobId ? { ...job, ratingData: data } : job));
-      if (offlineMode || isOfflineMode()) saveLocalJobs(next);
-      return next;
-    });
-
-    if (offlineMode || isOfflineMode()) {
-      updateLocalRating(jobId, data);
-      return;
-    }
+    setJobs(prev => prev.map(job => (job.id === jobId ? { ...job, ratingData: data } : job)));
 
     try {
       const { job } = await api.updateRating(jobId, data);
       upsertJob(job);
     } catch (err) {
-      if (isNetworkError(err)) {
-        enableOfflineMode(false);
-        updateLocalRating(jobId, data);
-        return;
-      }
       setToast({
         message: err instanceof Error ? err.message : 'Failed to save rating',
         type: 'error',
@@ -7190,6 +6977,85 @@ ${PDF_PRINT_STYLES}
                   className="px-4 py-2 rounded-xl text-xs font-bold uppercase tracking-wider bg-rose-600 hover:bg-rose-700 text-white shadow-md shadow-rose-600/20 transition-colors"
                 >
                   {takeBackConfirm.step === 1 ? 'Take Back' : 'Yes, Take Back'}
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {rejectConfirm && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[70] flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm"
+            onClick={() => setRejectConfirm(null)}
+          >
+            <motion.div
+              initial={{ opacity: 0, y: 12, scale: 0.96 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 12, scale: 0.96 }}
+              onClick={(e) => e.stopPropagation()}
+              className="w-full max-w-lg rounded-2xl border border-industrial-border bg-white shadow-2xl p-6 space-y-4"
+            >
+              <div className="flex items-start gap-3">
+                <div className="mt-0.5 rounded-full bg-rose-50 p-2 text-rose-600">
+                  <XCircle size={20} />
+                </div>
+                <div className="space-y-1 flex-1">
+                  <h3 className="text-base font-bold text-industrial-text">
+                    Reject "{rejectConfirm.testName}"?
+                  </h3>
+                  <p className="text-sm text-industrial-text-muted leading-relaxed">
+                    This will send the test back to <span className="font-semibold text-industrial-text">{rejectConfirm.targetStage}</span>
+                    {rejectConfirm.targetStage === 'Tested'
+                      ? ' and notify the Tester.'
+                      : rejectConfirm.targetStage === 'Reviewed'
+                        ? ' and notify the Reviewer.'
+                        : '.'}
+                  </p>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-mono uppercase text-industrial-text-muted mb-1.5 ml-1">
+                  Add Note <span className="text-rose-600">*</span>
+                </label>
+                <textarea
+                  value={rejectConfirm.note}
+                  onChange={(e) => setRejectConfirm({ ...rejectConfirm, note: e.target.value })}
+                  rows={4}
+                  placeholder="Explain the reason for rejection…"
+                  className="w-full bg-industrial-bg border border-industrial-border rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-rose-400 transition-colors resize-y min-h-[96px]"
+                />
+                <p className="mt-1.5 text-[11px] text-industrial-text-muted">
+                  This note will be visible to the person who receives the rejected test.
+                </p>
+              </div>
+
+              <div className="flex justify-end gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setRejectConfirm(null)}
+                  className="px-4 py-2 rounded-xl text-xs font-bold uppercase tracking-wider text-industrial-text-muted hover:bg-slate-100 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    void handleRejectTestStage(
+                      rejectConfirm.jobId,
+                      rejectConfirm.testId,
+                      rejectConfirm.targetStage,
+                      rejectConfirm.note
+                    );
+                  }}
+                  className="px-4 py-2 rounded-xl text-xs font-bold uppercase tracking-wider bg-rose-600 hover:bg-rose-700 text-white shadow-md shadow-rose-600/20 transition-colors"
+                >
+                  Reject & Send Note
                 </button>
               </div>
             </motion.div>
@@ -7423,36 +7289,47 @@ ${PDF_PRINT_STYLES}
               />
             </div>
 
-            {canBootstrapAuthorizer ? (
-              <div className="grid grid-cols-2 gap-2 mb-6 p-1 bg-industrial-bg rounded-xl border border-industrial-border">
-                <button
-                  type="button"
-                  onClick={() => { setAuthMode('login'); setAuthError(''); }}
-                  className={`py-2 rounded-lg text-xs font-bold uppercase tracking-wider transition-all ${
-                    authMode === 'login'
-                      ? 'bg-industrial-accent text-white shadow-sm'
-                      : 'text-industrial-text-muted hover:text-industrial-text'
-                  }`}
-                >
-                  Login
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setAuthMode('register');
-                    setAuthRole('Authorizer');
-                    setAuthError('');
-                  }}
-                  className={`py-2 rounded-lg text-xs font-bold uppercase tracking-wider transition-all ${
-                    authMode === 'register'
-                      ? 'bg-industrial-accent text-white shadow-sm'
-                      : 'text-industrial-text-muted hover:text-industrial-text'
-                  }`}
-                >
-                  Register
-                </button>
-              </div>
-            ) : (
+            <div className="grid grid-cols-2 gap-2 mb-6 p-1 bg-industrial-bg rounded-xl border border-industrial-border">
+              <button
+                type="button"
+                onClick={() => { setAuthMode('login'); setAuthError(''); }}
+                className={`py-2 rounded-lg text-xs font-bold uppercase tracking-wider transition-all ${
+                  authMode === 'login'
+                    ? 'bg-industrial-accent text-white shadow-sm'
+                    : 'text-industrial-text-muted hover:text-industrial-text'
+                }`}
+              >
+                Login
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  setAuthMode('register');
+                  setAuthRole('Authorizer');
+                  setAuthError('');
+                  try {
+                    const status = await api.registrationStatus();
+                    setCanBootstrapAuthorizer(status.canBootstrapAuthorizer);
+                    if (!status.canBootstrapAuthorizer) {
+                      setAuthError(
+                        'An Authorizer already exists. Use Login, then Registered Staff to add Tester/Reviewer accounts.'
+                      );
+                    }
+                  } catch (err) {
+                    setAuthError(err instanceof Error ? err.message : 'Cannot reach API.');
+                  }
+                }}
+                className={`py-2 rounded-lg text-xs font-bold uppercase tracking-wider transition-all ${
+                  authMode === 'register'
+                    ? 'bg-industrial-accent text-white shadow-sm'
+                    : 'text-industrial-text-muted hover:text-industrial-text'
+                }`}
+              >
+                Register
+              </button>
+            </div>
+
+            {authMode === 'login' && !canBootstrapAuthorizer && (
               <div className="mb-6 rounded-xl border border-industrial-border bg-industrial-bg px-4 py-3">
                 <p className="text-[11px] font-bold uppercase tracking-wider text-industrial-text-muted">
                   Staff accounts
@@ -7460,6 +7337,40 @@ ${PDF_PRINT_STYLES}
                 <p className="mt-1 text-xs text-industrial-text-muted">
                   Only an Authorizer can register Tester and Reviewer accounts after login.
                 </p>
+              </div>
+            )}
+
+            {authMode === 'register' && (
+              <div className={`mb-6 rounded-xl border px-4 py-3 ${
+                canBootstrapAuthorizer
+                  ? 'border-industrial-border bg-industrial-bg'
+                  : 'border-amber-200 bg-amber-50'
+              }`}>
+                <p className={`text-[11px] font-bold uppercase tracking-wider ${
+                  canBootstrapAuthorizer ? 'text-industrial-text-muted' : 'text-amber-800'
+                }`}>
+                  Authorizer registration
+                </p>
+                <p className={`mt-1 text-xs ${
+                  canBootstrapAuthorizer ? 'text-industrial-text-muted' : 'text-amber-800'
+                }`}>
+                  {canBootstrapAuthorizer
+                    ? 'Create the first Authorizer account for this system.'
+                    : 'An Authorizer already exists on the server. Please Login instead, then use Registered Staff to create Tester/Reviewer accounts.'}
+                </p>
+                {!canBootstrapAuthorizer && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAuthMode('login');
+                      setAuthRole('Authorizer');
+                      setAuthError('');
+                    }}
+                    className="mt-3 text-xs font-bold uppercase tracking-wider text-industrial-accent hover:underline"
+                  >
+                    Go to Login
+                  </button>
+                )}
               </div>
             )}
 
@@ -7550,7 +7461,8 @@ ${PDF_PRINT_STYLES}
               <button 
                 id="login-btn"
                 onClick={authMode === 'login' ? handleLogin : handleRegister}
-                className="w-full bg-industrial-accent hover:bg-blue-700 text-white font-medium py-3 rounded-lg flex items-center justify-center gap-2 transition-all mt-4 shadow-sm"
+                disabled={authMode === 'register' && !canBootstrapAuthorizer}
+                className="w-full bg-industrial-accent hover:bg-blue-700 text-white font-medium py-3 rounded-lg flex items-center justify-center gap-2 transition-all mt-4 shadow-sm disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-industrial-accent"
               >
                 {authMode === 'login' ? (
                   <>Login as {authRole} <ArrowRight size={18} /></>
@@ -7568,6 +7480,7 @@ ${PDF_PRINT_STYLES}
                   Skip for now
                 </button>
               )}
+
             </div>
             <p className="mt-8 text-center text-sm text-industrial-text-muted">
               Secure Data Management for Testing Department
@@ -7710,7 +7623,7 @@ ${PDF_PRINT_STYLES}
                 }}
                 className="w-full mt-2 py-3 rounded-lg border border-industrial-border text-industrial-text-muted hover:text-industrial-text hover:border-industrial-accent/40 text-sm font-medium transition-all"
               >
-                {editingStaffId ? 'Cancel' : 'Skip for now'}
+                'Cancel'
               </button>
             </div>
           </motion.div>
@@ -8687,6 +8600,11 @@ ${PDF_PRINT_STYLES}
                                     Awaiting Authorizer Sign-Off
                                   </span>
                                 )}
+                                {getRejectionNote(test) && (
+                                  <span className="px-2 py-0.5 bg-rose-100 text-rose-700 text-[10px] font-bold rounded uppercase border border-rose-200">
+                                    Rejected — Note Added
+                                  </span>
+                                )}
                               </div>
                               <div className="flex items-center gap-4 text-xs font-mono text-industrial-text-muted">
                                 <span className="flex items-center gap-1"><Timer size={12} /> {new Date(test.updatedAt).toLocaleTimeString()}</span>
@@ -8694,12 +8612,27 @@ ${PDF_PRINT_STYLES}
                                   <span className="text-green-600 font-bold bg-green-50 px-1.5 py-0.5 rounded">REPORT DATA FILLED</span>
                                 )}
                               </div>
+                              {(() => {
+                                const rejection = getRejectionMeta(test);
+                                if (!rejection) return null;
+                                return (
+                                  <div className="mt-3 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2.5 text-xs text-rose-900 space-y-1 max-w-xl">
+                                    <p className="font-bold uppercase tracking-wider text-[10px] text-rose-700">
+                                      Rejection note
+                                      {rejection.fromStage && rejection.toStage
+                                        ? ` (${rejection.fromStage} → ${rejection.toStage})`
+                                        : ''}
+                                    </p>
+                                    <p className="leading-relaxed whitespace-pre-wrap">{rejection.note}</p>
+                                    <p className="text-[10px] text-rose-700/80 font-mono">
+                                      By {rejection.by}{rejection.at ? ` · ${rejection.at}` : ''}
+                                    </p>
+                                  </div>
+                                );
+                              })()}
                               
                               {/* Report Data Entry Toggle */}
-                              {!(
-                                (currentRole === 'Admin_Tested' && (test.stage === 'Reviewed' || test.stage === 'Authorized')) ||
-                                (currentRole === 'Admin_Reviewed' && test.stage === 'Authorized')
-                              ) ? (
+                              {!isReportLockedForRole(currentRole, test) ? (
                                 <div className="flex items-center gap-3 flex-wrap mt-3">
                                   <button 
                                     onClick={() => {
@@ -8736,7 +8669,7 @@ ${PDF_PRINT_STYLES}
                                   <div className="text-xs text-industrial-text-muted flex items-center gap-1 font-semibold bg-gray-100/60 px-2 py-1 rounded w-fit border border-gray-200">
                                     <Lock size={12} className="text-gray-400" /> Report Locked ({test.stage})
                                   </div>
-                                  {test.stage === 'Authorized' && currentRole !== 'Admin_Tested' && (
+                                  {test.stage === 'Authorized' && currentRole === 'Admin_Authorized' && (
                                     <button 
                                       onClick={() => handleDownloadTestReport(selectedJob, test)}
                                       className="text-xs font-bold text-emerald-600 hover:text-emerald-700 underline flex items-center gap-1.5 cursor-pointer"
@@ -8769,7 +8702,10 @@ ${PDF_PRINT_STYLES}
                                   const canClick = isPrerequisiteMet && hasRequiredRole;
 
                                   const isTestedAdminLocked = currentRole === 'Admin_Tested' && (test.stage === 'Reviewed' || test.stage === 'Authorized');
-                                  const isReviewedAdminLocked = currentRole === 'Admin_Reviewed' && test.stage === 'Authorized';
+                                  const isReviewedAdminLocked =
+                                    currentRole === 'Admin_Reviewed' &&
+                                    test.stage === 'Authorized' &&
+                                    isHvTestingReport(test);
                                   const isStageLocked = isTestedAdminLocked || isReviewedAdminLocked;
 
                                   const stageButtonClass = (() => {
@@ -8885,13 +8821,14 @@ ${PDF_PRINT_STYLES}
         )}
         {view === 'TEST_REPORT' && selectedJob && editingTest && (
           (() => {
-            const isAccessDenied = (
-              (currentRole === 'Admin_Tested' && (editingTest.stage === 'Reviewed' || editingTest.stage === 'Authorized')) ||
-              (currentRole === 'Admin_Reviewed' && editingTest.stage === 'Authorized')
-            );
+            const isAccessDenied = isReportLockedForRole(currentRole, editingTest);
             const isChecklist = editingTest.name === 'Checklist for TFR BEFORE HV';
             const testData = editingTest.observationData || {};
+            const isReviewerViewOnly =
+              currentRole === 'Admin_Reviewed' && editingTest.stage === 'Authorized';
             const handleTestFieldChange = (key: string, value: string) => {
+              // After Authorizer approval, Reviewers may view (non-HV) but not edit.
+              if (isReviewerViewOnly) return;
               handleUpdateTestData(selectedJob.id, editingTest.id, { ...testData, [key]: value });
             };
             if (isAccessDenied) {
@@ -8902,7 +8839,9 @@ ${PDF_PRINT_STYLES}
                   <p className="text-sm mb-6">
                     {currentRole === 'Admin_Tested' 
                       ? "Tested Admins are restricted from viewing or editing Reviewed/Authorized test reports."
-                      : "Reviewed Admins are restricted from viewing or editing Authorized test reports."}
+                      : isHvTestingReport(editingTest)
+                        ? "Reviewers cannot view HV Testing reports after Authorizer approval."
+                        : "Reviewed Admins are restricted from viewing or editing Authorized test reports."}
                   </p>
                   <button 
                     onClick={() => setView('JOB_DETAIL')}
@@ -8942,6 +8881,30 @@ ${PDF_PRINT_STYLES}
                 Cancel & Exit
               </button>
             </div>
+
+            {(() => {
+              const rejection = getRejectionMeta(editingTest);
+              if (!rejection) return null;
+              return (
+                <div className="mb-6 rounded-2xl border border-rose-200 bg-rose-50 px-5 py-4 text-rose-900 no-print">
+                  <div className="flex items-start gap-3">
+                    <AlertCircle size={20} className="text-rose-600 shrink-0 mt-0.5" />
+                    <div className="space-y-1.5 min-w-0">
+                      <h3 className="text-sm font-bold uppercase tracking-wider text-rose-700">
+                        Rejection note
+                        {rejection.fromStage && rejection.toStage
+                          ? ` · ${rejection.fromStage} → ${rejection.toStage}`
+                          : ''}
+                      </h3>
+                      <p className="text-sm leading-relaxed whitespace-pre-wrap">{rejection.note}</p>
+                      <p className="text-[11px] font-mono text-rose-700/80">
+                        By {rejection.by}{rejection.at ? ` · ${rejection.at}` : ''}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
 
             <div id="printable-test-report" data-test-id={editingTest.id} className="space-y-6">
             <JobRatingForm 
@@ -9034,12 +8997,9 @@ ${PDF_PRINT_STYLES}
 
              {/* Bottom Actions */}
              <div className="mt-8 flex justify-center gap-4 flex-wrap no-print">
-               {editingTest.stage === 'Reviewed' && (
+               {editingTest.stage === 'Reviewed' && currentRole === 'Admin_Reviewed' && (
                  <button 
-                   onClick={() => {
-                     handleRejectTestStage(selectedJob.id, editingTest.id, 'Tested');
-                     setView('JOB_DETAIL');
-                   }}
+                   onClick={() => openRejectConfirm(selectedJob.id, editingTest.id, 'Tested')}
                    className="bg-red-600 hover:bg-red-700 shadow-md shadow-red-600/20 text-white px-8 py-4 rounded-2xl font-bold transition-all flex items-center gap-2 text-lg cursor-pointer"
                  >
                    <XCircle size={24} />
@@ -9063,9 +9023,7 @@ ${PDF_PRINT_STYLES}
                    </button>
                    {currentRole === 'Admin_Authorized' && (
                      <button 
-                       onClick={() => {
-                         handleRejectTestStage(selectedJob.id, editingTest.id, 'Reviewed');
-                       }}
+                       onClick={() => openRejectConfirm(selectedJob.id, editingTest.id, 'Reviewed')}
                        className="bg-red-600 hover:bg-red-700 shadow-md shadow-red-600/20 text-white px-8 py-4 rounded-2xl font-bold transition-all flex items-center gap-2 text-lg cursor-pointer"
                      >
                        <XCircle size={24} />
@@ -9156,9 +9114,8 @@ ${PDF_PRINT_STYLES}
       </AnimatePresence>
 
       <div className="fixed bottom-4 left-4 flex items-center gap-4 text-[10px] font-mono text-industrial-text-muted uppercase tracking-[0.2em] opacity-40 hover:opacity-100 transition-opacity">
-          <div className={`flex items-center gap-1.5 ${offlineMode || isOfflineMode() ? 'text-amber-600' : ''}`}>
-            <span className={`w-2 h-2 rounded-full ${offlineMode || isOfflineMode() ? 'bg-amber-500' : 'bg-green-500'}`}></span>
-            {offlineMode || isOfflineMode() ? ' Offline Mode' : ' System Online'}
+          <div className="flex items-center gap-1.5">
+            <span className="w-2 h-2 rounded-full bg-green-500"></span> System Online
           </div>
         <div className="h-3 w-px bg-industrial-border"></div>
         <div>V.2.4.0-CORE</div>
