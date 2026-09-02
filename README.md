@@ -18,7 +18,7 @@
 - API: http://localhost:4000
 
 ### Production
-- Frontend: https://test.apivishvaspower.com/
+- Frontend: https://test.apivishvaspower.online/
 - API: https://vishwaspower.in/volttrack/api (`VITE_API_URL=https://vishwaspower.in/volttrack`)
 
 Or separately:
