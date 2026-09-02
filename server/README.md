@@ -19,18 +19,21 @@ npm run dev:all
 
 Frontend: `http://localhost:3000` → proxies `/api` to backend.
 
-## Production (https://test.apivishvaspower.com/)
+## Production (https://test.apivishvaspower.online/)
 
-Serve the Vite build from that host and reverse-proxy `/api` to this Express app.
+Frontend is hosted separately and calls the VPS API at `https://vishwaspower.in/volttrack/api`.
 
 Backend env (see `server/.env.example`):
 
 ```
-APP_URL=https://test.apivishvaspower.com
-CORS_ORIGINS=https://test.apivishvaspower.com,http://localhost:3000
+APP_URL=https://test.apivishvaspower.online
+CORS_ORIGINS=https://test.apivishvaspower.online,https://test.apivishvaspower.com,http://localhost:3000
+API_BASE_PATH=/volttrack
 ```
 
-Frontend production build uses empty `VITE_API_URL` so requests go to same-origin `/api`.
+Frontend production build sets `VITE_API_URL=https://vishwaspower.in/volttrack`.
+
+Also allow the previous host `https://test.apivishvaspower.com` in CORS if both domains are used.
 
 ## Endpoints
 

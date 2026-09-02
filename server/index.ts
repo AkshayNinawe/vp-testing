@@ -51,7 +51,8 @@ import type {
 
 const app = express();
 const PORT = Number(process.env.PORT || 4000);
-const DEFAULT_CORS_ORIGINS = 'http://localhost:3000,http://127.0.0.1:3000,https://test.apivishvaspower.com';
+const DEFAULT_CORS_ORIGINS =
+  'http://localhost:3000,http://127.0.0.1:3000,https://test.apivishvaspower.com,https://test.apivishvaspower.online';
 const CORS_ORIGINS = (process.env.CORS_ORIGINS || process.env.APP_URL || DEFAULT_CORS_ORIGINS)
   .split(',')
   .map(origin => origin.trim().replace(/\/$/, ''))
@@ -71,8 +72,10 @@ app.use(
         normalized.includes('localhost') ||
         normalized.includes('127.0.0.1') ||
         normalized.includes('test.apivishvaspower.com') ||
+        normalized.includes('test.apivishvaspower.online') ||
         normalized.includes('vishwaspower.in') ||
-        normalized.includes('apivishvaspower.com');
+        normalized.includes('apivishvaspower.com') ||
+        normalized.includes('apivishvaspower.online');
       if (allowed) return callback(null, true);
       return callback(null, false);
     },
