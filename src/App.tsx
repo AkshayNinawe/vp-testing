@@ -5641,6 +5641,7 @@ export default function App() {
   };
 
   const observationSaveTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const pendingObservationData = useRef<Record<string, Record<string, string>>>({});
   const pendingDownloadTestId = useRef<string | null>(null);
 
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'info' | 'error' } | null>(null);
@@ -6754,6 +6755,10 @@ ${PDF_PRINT_STYLES}
         setToast({ message: 'Job or test not found', type: 'error' });
         return false;
       }
+      if (result.error) {
+        setToast({ message: result.error, type: 'error' });
+        return false;
+      }
       upsertJob(result.job);
       emitStageNotifications(result.job);
       if (result.openTestId) {
@@ -6779,6 +6784,10 @@ ${PDF_PRINT_STYLES}
       if (isNetworkError(err)) {
         enableOfflineMode(false);
         const result = updateLocalStage(jobId, testId, targetStage, 'promote');
+        if (result?.error) {
+          setToast({ message: result.error, type: 'error' });
+          return false;
+        }
         if (result) {
           upsertJob(result.job);
           emitStageNotifications(result.job);
@@ -7027,7 +7036,48 @@ ${PDF_PRINT_STYLES}
     }
   };
 
+  const persistObservation = async (jobId: string, testId: string, data: Record<string, string>) => {
+    if (offlineMode || isOfflineMode()) {
+      const updated = updateLocalObservation(jobId, testId, data);
+      if (updated) upsertJob(updated.job);
+      return;
+    }
+    try {
+      const { job } = await api.updateObservation(jobId, testId, data);
+      upsertJob(job);
+    } catch (err) {
+      if (isNetworkError(err)) {
+        enableOfflineMode(false);
+        const updated = updateLocalObservation(jobId, testId, data);
+        if (updated) upsertJob(updated.job);
+        return;
+      }
+      setToast({
+        message: err instanceof Error ? err.message : 'Failed to save observations',
+        type: 'error',
+      });
+    }
+  };
+
+  const flushPendingObservationSaves = () => {
+    Object.keys(observationSaveTimers.current).forEach((key) => {
+      clearTimeout(observationSaveTimers.current[key]);
+      delete observationSaveTimers.current[key];
+      const pending = pendingObservationData.current[key];
+      if (!pending) return;
+      delete pendingObservationData.current[key];
+      const [jobId, testId] = key.split(':');
+      void persistObservation(jobId, testId, pending);
+    });
+  };
+
   const handleUpdateTestData = async (jobId: string, testId: string, data: Record<string, string>) => {
+    const previousTest = jobs.find(j => j.id === jobId)?.tests.find(t => t.id === testId);
+    const previousData = previousTest?.observationData || {};
+    const signOffChanged = Object.keys({ ...previousData, ...data }).some(
+      k => k.endsWith('_by') && (previousData[k] || '') !== (data[k] || '')
+    );
+
     setJobs(prev => prev.map(job => {
       if (job.id !== jobId) return job;
       return {
@@ -7043,28 +7093,22 @@ ${PDF_PRINT_STYLES}
     const key = `${jobId}:${testId}`;
     if (observationSaveTimers.current[key]) {
       clearTimeout(observationSaveTimers.current[key]);
+      delete observationSaveTimers.current[key];
     }
+
+    // Sign-off selections are discrete picks, not typing — persist them right away
+    // so job status is recomputed and the save cannot be lost on navigation.
+    if (signOffChanged) {
+      delete pendingObservationData.current[key];
+      await persistObservation(jobId, testId, data);
+      return;
+    }
+
+    pendingObservationData.current[key] = data;
     observationSaveTimers.current[key] = setTimeout(async () => {
-      if (offlineMode || isOfflineMode()) {
-        const updated = updateLocalObservation(jobId, testId, data);
-        if (updated) upsertJob(updated.job);
-        return;
-      }
-      try {
-        const { job } = await api.updateObservation(jobId, testId, data);
-        upsertJob(job);
-      } catch (err) {
-        if (isNetworkError(err)) {
-          enableOfflineMode(false);
-          const updated = updateLocalObservation(jobId, testId, data);
-          if (updated) upsertJob(updated.job);
-          return;
-        }
-        setToast({
-          message: err instanceof Error ? err.message : 'Failed to save observations',
-          type: 'error',
-        });
-      }
+      delete observationSaveTimers.current[key];
+      delete pendingObservationData.current[key];
+      await persistObservation(jobId, testId, data);
     }, 400);
   };
 
@@ -7924,14 +7968,14 @@ ${PDF_PRINT_STYLES}
                     <div className="divide-y divide-industrial-border">
                       {jobs.slice(0, 5).map((job) => {
                         const counts = {
-                          tested: job.tests.filter(t => t.stage === 'Tested' && t.accepted !== false).length,
-                          reviewed: job.tests.filter(t => t.stage === 'Reviewed' && t.accepted !== false).length,
-                          authorized: job.tests.filter(t => isTestCompleted(t) && t.accepted !== false).length,
-                          total: job.tests.filter(t => t.accepted !== false).length || 1
+                          tested: job.tests.filter(t => t.stage === 'Tested').length,
+                          reviewed: job.tests.filter(t => t.stage === 'Reviewed').length,
+                          authorized: job.tests.filter(t => isTestCompleted(t)).length,
+                          total: job.tests.length || 1
                         };
-                        
-                        const processingTests = job.tests.filter(t => t.accepted !== false && t.stage !== 'Authorized');
-                        const completedTests = job.tests.filter(t => t.accepted !== false && isTestCompleted(t));
+
+                        const processingTests = job.tests.filter(t => !isTestCompleted(t));
+                        const completedTests = job.tests.filter(t => isTestCompleted(t));
 
                         let ongoingStageLabel = 'Processing';
                         let stageColor = 'text-amber-500';
@@ -8421,14 +8465,14 @@ ${PDF_PRINT_STYLES}
                       <tbody className="divide-y divide-industrial-border/50">
                         {filteredJobs.map((job) => {
                           const counts = {
-                            tested: job.tests.filter(t => t.stage === 'Tested' && t.accepted !== false).length,
-                            reviewed: job.tests.filter(t => t.stage === 'Reviewed' && t.accepted !== false).length,
-                            authorized: job.tests.filter(t => isTestCompleted(t) && t.accepted !== false).length,
-                            total: job.tests.filter(t => t.accepted !== false).length || 1
+                            tested: job.tests.filter(t => t.stage === 'Tested').length,
+                            reviewed: job.tests.filter(t => t.stage === 'Reviewed').length,
+                            authorized: job.tests.filter(t => isTestCompleted(t)).length,
+                            total: job.tests.length || 1
                           };
 
-                          const processingTests = job.tests.filter(t => t.accepted !== false && t.stage !== 'Authorized');
-                          const completedTests = job.tests.filter(t => t.accepted !== false && isTestCompleted(t));
+                          const processingTests = job.tests.filter(t => !isTestCompleted(t));
+                          const completedTests = job.tests.filter(t => isTestCompleted(t));
 
                           let ongoingStageLabel = 'Not Started';
                           let stageColor = 'bg-gray-100 text-gray-500 border-gray-200';

@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto';
 import { getAuthorizerFieldKey, getSelectedValue } from './signOff';
 import type {
   Job,
+  JobStatus,
   TransformerCapacity,
   TransformerType,
   TransformerTest,
@@ -127,10 +128,10 @@ export function createJob(input: {
   };
 }
 
-export function recomputeJobStatus(tests: TransformerTest[]) {
+export function recomputeJobStatus(tests: TransformerTest[]): JobStatus {
   const hasAuthorizerSignOff = (test: TransformerTest) =>
     getSelectedValue(test.observationData, getAuthorizerFieldKey(test.name)).length > 0;
-  return tests.every(t => t.stage === 'Authorized' && hasAuthorizerSignOff(t))
+  return tests.length > 0 && tests.every(t => t.stage === 'Authorized' && hasAuthorizerSignOff(t))
     ? 'Completed'
     : 'Processing';
 }

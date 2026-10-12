@@ -113,7 +113,9 @@ function recomputeJobStatus(tests: TransformerTest[]) {
     if (n === 'POST-TANKING TEST') return String(data.pt_authorized_by || '').trim().length > 0;
     return String(data.authorized_by || '').trim().length > 0;
   };
-  return tests.every(t => t.stage === 'Authorized' && hasAuthorizerSignOff(t))
+  // Mirrors server/jobFactory.recomputeJobStatus — an empty test list must never
+  // read as Completed (vacuous truth of Array.every).
+  return tests.length > 0 && tests.every(t => t.stage === 'Authorized' && hasAuthorizerSignOff(t))
     ? 'Completed'
     : 'Processing';
 }
@@ -222,7 +224,9 @@ export function updateLocalObservation(
     return updatedTest;
   });
   if (!updatedTest) return null;
-  const next = replaceLocalJob({ ...job, tests });
+  // Sign-off names live in observationData, so a change here can flip the job
+  // between Processing/Completed. Mirrors the server /observation handler.
+  const next = replaceLocalJob({ ...job, tests, status: recomputeJobStatus(tests) });
   return { job: next, test: updatedTest };
 }
 
@@ -231,11 +235,14 @@ export function updateLocalStage(
   testId: string,
   targetStage: TestStage,
   action: 'promote' | 'reject' = 'promote'
-): { job: Job; openTestId?: string | null } | null {
+): { job: Job; openTestId?: string | null; error?: string } | null {
   const job = loadLocalJobs().find(j => j.id === jobId);
   if (!job) return null;
 
   let openTestId: string | null = null;
+  // Mirrors the server stage handler, which rejects the promotion with a reason
+  // instead of silently leaving the stage unchanged.
+  let error: string | null = null;
   const nowString = new Date().toLocaleString();
 
   const techKey = (name: string) => {
@@ -267,9 +274,11 @@ export function updateLocalStage(
 
     if (action === 'promote') {
       if (targetStage === 'Reviewed' && !String(observationData[techKey(test.name)] || '').trim()) {
+        error = 'Select Technician is mandatory before submitting to Reviewer.';
         return test;
       }
       if (targetStage === 'Authorized' && !String(observationData[revKey(test.name)] || '').trim()) {
+        error = 'Select Reviewer is mandatory before submitting to Authorizer.';
         return test;
       }
 
@@ -356,6 +365,11 @@ export function updateLocalStage(
 
     return { ...test, stage: targetStage, observationData, updatedAt: Date.now() };
   });
+
+  if (error) {
+    // Nothing changed — report why so the caller does not show a false success.
+    return { job, openTestId: null, error };
+  }
 
   const next = replaceLocalJob({
     ...job,

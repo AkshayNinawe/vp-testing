@@ -456,7 +456,7 @@ api.patch('/jobs/:jobId/tests/:testId/observation', requireAuth, async (req: Aut
       });
 
       if (!updatedTest && !denied) return null;
-      return { ...job, tests };
+      return { ...job, tests, status: recomputeJobStatus(tests) };
     });
 
     if (denied) return res.status(403).json({ error: 'Test is locked for your role' });

@@ -29,3 +29,15 @@ Or separately:
 Register/login as **Tester**, **Reviewer**, or **Authorizer**. Passwords are hashed in MongoDB (`users` collection).
 
 Set `MONGODB_URI` in `.env` (default: `mongodb://127.0.0.1:27017/volttrack`).
+
+### Maintenance scripts
+
+Recompute stored job `status` (`Processing` / `Completed`) for existing records:
+
+```bash
+npx tsx server/scripts/backfillJobStatus.ts --dry-run   # preview
+npx tsx server/scripts/backfillJobStatus.ts             # apply
+```
+
+See [FRONTEND_HANDOFF_JOB_STATUS_FIX.md](./FRONTEND_HANDOFF_JOB_STATUS_FIX.md) for
+the job-status rule and when this backfill is needed.
