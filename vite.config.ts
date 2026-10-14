@@ -22,8 +22,9 @@ export default defineConfig(({mode}) => {
       // Disable file watching when DISABLE_HMR is true to save CPU during agent edits.
       watch: process.env.DISABLE_HMR === 'true' ? null : {},
       proxy: {
+        // Used when VITE_API_URL is empty. Prefer local API; fall back target is the VPS.
         '/api': {
-          target: 'http://localhost:4000',
+          target: env.VITE_DEV_PROXY_TARGET || 'http://localhost:4000',
           changeOrigin: true,
         },
       },

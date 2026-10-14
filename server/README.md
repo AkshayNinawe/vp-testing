@@ -19,18 +19,21 @@ npm run dev:all
 
 Frontend: `http://localhost:3000` → proxies `/api` to backend.
 
-## Production (https://test.apivishvaspower.com/)
+## Production (https://test.apivishvaspower.online/)
 
-Serve the Vite build from that host and reverse-proxy `/api` to this Express app.
+Frontend is hosted separately and calls the VPS API at `https://vishwaspower.in/volttrack/api`.
 
 Backend env (see `server/.env.example`):
 
 ```
-APP_URL=https://test.apivishvaspower.com
-CORS_ORIGINS=https://test.apivishvaspower.com,http://localhost:3000
+APP_URL=https://test.apivishvaspower.online
+CORS_ORIGINS=https://test.apivishvaspower.online,https://test.apivishvaspower.com,http://localhost:3000
+API_BASE_PATH=/volttrack
 ```
 
-Frontend production build uses empty `VITE_API_URL` so requests go to same-origin `/api`.
+Frontend production build sets `VITE_API_URL=https://vishwaspower.in/volttrack`.
+
+Also allow the previous host `https://test.apivishvaspower.com` in CORS if both domains are used.
 
 ## Endpoints
 
@@ -58,13 +61,18 @@ Roles: `Tester` | `Reviewer` | `Authorizer`
 - `PATCH /api/jobs/:jobId/tests/:testId/observation` `{ observationData }`
   - Tester cannot change Reviewer / Authorizer sign-off fields
   - Reviewer cannot change Technician / Authorizer sign-off fields
-- `PATCH /api/jobs/:jobId/tests/:testId/stage` `{ stage, action: 'promote'|'reject' }`
+  - Reviewer cannot edit observations after stage is `Authorized` (view-only in UI except HV Testing, which stays locked)
+- `PATCH /api/jobs/:jobId/tests/:testId/stage` `{ stage, action: 'promote'|'reject', note? }`
   - Promote `Tested` → `Reviewed` requires Technician selected
   - Promote `Reviewed` → `Authorized` requires Reviewer selected
   - Sign-off keys: default `tested_by` / `reviewed_by` / `authorized_by`;
     POST-CONNECTION uses `pct_*`; POST-TANKING uses `pt_*`;
     FINAL LV uses `offered_by` (technician) and `tested_by` (reviewer)
+  - Reject requires `note` (stored as `rejection_note` / `rejection_by` / `rejection_at` /
+    `rejection_from_stage` / `rejection_to_stage` on the test observation)
+  - Reject role rules: Reviewer `Reviewed` → `Tested`; Authorizer `Authorized` → `Reviewed`
   - Reject clears matching `pct_*` / `pt_*` / `offered_*` sign-off fields
+  - Promote clears prior rejection note fields
 - `PATCH /api/jobs/:jobId/tests/:testId/accept`
 - `PATCH /api/jobs/:jobId/tests/:testId/unaccept` (take back accepted offer if still Not Started)
 - `POST /api/jobs/:jobId/tests/accept-all`

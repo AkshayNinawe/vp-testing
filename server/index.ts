@@ -30,6 +30,8 @@ import {
 import { createJob, recomputeJobStatus } from './jobFactory';
 import {
   applyRoleSignOffLocks,
+  applyRejectionFields,
+  clearRejectionFields,
   clearSignOffOnReject,
   getReviewerFieldKey,
   getSelectedValue,
@@ -49,7 +51,8 @@ import type {
 
 const app = express();
 const PORT = Number(process.env.PORT || 4000);
-const DEFAULT_CORS_ORIGINS = 'http://localhost:3000,http://127.0.0.1:3000,https://test.apivishvaspower.com';
+const DEFAULT_CORS_ORIGINS =
+  'http://localhost:3000,http://127.0.0.1:3000,https://test.apivishvaspower.com,https://test.apivishvaspower.online';
 const CORS_ORIGINS = (process.env.CORS_ORIGINS || process.env.APP_URL || DEFAULT_CORS_ORIGINS)
   .split(',')
   .map(origin => origin.trim().replace(/\/$/, ''))
@@ -69,8 +72,10 @@ app.use(
         normalized.includes('localhost') ||
         normalized.includes('127.0.0.1') ||
         normalized.includes('test.apivishvaspower.com') ||
+        normalized.includes('test.apivishvaspower.online') ||
         normalized.includes('vishwaspower.in') ||
-        normalized.includes('apivishvaspower.com');
+        normalized.includes('apivishvaspower.com') ||
+        normalized.includes('apivishvaspower.online');
       if (allowed) return callback(null, true);
       return callback(null, false);
     },
@@ -436,6 +441,8 @@ api.patch('/jobs/:jobId/tests/:testId/observation', requireAuth, async (req: Aut
 
         const lockedForTester =
           role === 'Admin_Tested' && (test.stage === 'Reviewed' || test.stage === 'Authorized');
+        // Reviewers may view Authorized reports in the UI (except HV Testing),
+        // but observation edits remain locked after Authorizer approval.
         const lockedForReviewer = role === 'Admin_Reviewed' && test.stage === 'Authorized';
         if (lockedForTester || lockedForReviewer) {
           denied = true;
@@ -473,9 +480,22 @@ api.patch('/jobs/:jobId/tests/:testId/stage', requireAuth, async (req: AuthedReq
     const targetStage = req.body?.stage as TestStage;
     const action = (req.body?.action as 'promote' | 'reject') || 'promote';
     const role = req.userRole!;
+    const rejectionNote = String(req.body?.note || '').trim();
 
     if (!['Not Started', 'Tested', 'Reviewed', 'Authorized'].includes(targetStage)) {
       return res.status(400).json({ error: 'Invalid stage' });
+    }
+
+    if (action === 'reject' && !rejectionNote) {
+      return res.status(400).json({ error: 'Rejection note is required' });
+    }
+
+    let actorName = req.auth?.username || 'Unknown';
+    try {
+      const actor = await findUserById(req.auth!.userId);
+      if (actor?.name) actorName = actor.name;
+    } catch {
+      // keep username fallback
     }
 
     let error: string | null = null;
@@ -511,6 +531,9 @@ api.patch('/jobs/:jobId/tests/:testId/stage', requireAuth, async (req: AuthedReq
           const nowString = new Date().toLocaleString();
           const testNameUpper = test.name.toUpperCase();
           const isFinalLv = testNameUpper === 'FINAL LV TEST REPORT';
+
+          // Clear prior rejection note once the test is promoted again.
+          clearRejectionFields(observationData);
 
           stampPrefixedSignOffDates(test.name, observationData, targetStage, nowString);
 
@@ -568,14 +591,19 @@ api.patch('/jobs/:jobId/tests/:testId/stage', requireAuth, async (req: AuthedReq
           return test;
         }
 
+        // Reviewer: Authorized work is not theirs to reject — only Reviewed → Tested.
+        // Authorizer: Authorized → Reviewed (and optional reset to Not Started).
         const canReject =
-          (targetStage === 'Tested' && test.stage === 'Reviewed') ||
-          (targetStage === 'Reviewed' && test.stage === 'Authorized') ||
-          (targetStage === 'Not Started' &&
+          (role === 'Admin_Reviewed' && targetStage === 'Tested' && test.stage === 'Reviewed') ||
+          (role === 'Admin_Authorized' &&
+            targetStage === 'Reviewed' &&
+            test.stage === 'Authorized') ||
+          (role === 'Admin_Authorized' &&
+            targetStage === 'Not Started' &&
             (test.stage === 'Tested' || test.stage === 'Reviewed' || test.stage === 'Authorized'));
 
         if (!canReject) {
-          error = 'Invalid reject transition';
+          error = 'Invalid reject transition for your role';
           return test;
         }
 
@@ -583,6 +611,13 @@ api.patch('/jobs/:jobId/tests/:testId/stage', requireAuth, async (req: AuthedReq
         if (targetStage === 'Tested' || targetStage === 'Reviewed' || targetStage === 'Not Started') {
           clearSignOffOnReject(observationData, targetStage);
         }
+
+        applyRejectionFields(observationData, {
+          note: rejectionNote,
+          by: actorName,
+          fromStage: test.stage,
+          toStage: targetStage,
+        });
 
         return {
           ...test,

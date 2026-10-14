@@ -1,14 +1,6 @@
-import type {
-  AuthRole,
-  AuthUser,
-  Job,
-  TestStage,
-  TransformerCapacity,
-  TransformerTest,
-  TransformerType,
-  UserRole,
-} from './types';
+import type { AuthRole } from './types';
 
+<<<<<<< HEAD
 const JOBS_KEY = 'volttrack_local_jobs_v1';
 const USERS_KEY = 'volttrack_local_users_v1';
 const OFFLINE_KEY = 'volttrack_offline_v1';
@@ -130,16 +122,20 @@ export function setOfflineMode(enabled: boolean) {
 }
 
 export function loadLocalJobs(): Job[] {
+=======
+/** Clear legacy offline/local job+user caches from older builds. */
+export function clearLegacyLocalData() {
+>>>>>>> bf38805e7b6b5b32d69b61eb0fa06c47de02ec68
   try {
-    const raw = localStorage.getItem(JOBS_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as Job[];
-    return Array.isArray(parsed) ? parsed : [];
+    localStorage.removeItem('volttrack_offline_v1');
+    localStorage.removeItem('volttrack_local_jobs_v1');
+    localStorage.removeItem('volttrack_local_users_v1');
   } catch {
-    return [];
+    // ignore
   }
 }
 
+<<<<<<< HEAD
 export function saveLocalJobs(jobs: Job[]) {
   localStorage.setItem(JOBS_KEY, JSON.stringify(jobs));
 }
@@ -411,120 +407,14 @@ export function acceptAllLocalTests(jobId: string): Job | null {
   return replaceLocalJob({ ...job, tests });
 }
 
+=======
+>>>>>>> bf38805e7b6b5b32d69b61eb0fa06c47de02ec68
 export function isNetworkError(err: unknown) {
   return (
     err instanceof TypeError ||
     (err instanceof Error &&
       /failed to fetch|networkerror|request failed|econnrefused/i.test(err.message))
   );
-}
-
-export type LocalUser = AuthUser & { password: string };
-
-function loadLocalUsers(): LocalUser[] {
-  try {
-    const raw = localStorage.getItem(USERS_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as LocalUser[];
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-
-function saveLocalUsers(users: LocalUser[]) {
-  localStorage.setItem(USERS_KEY, JSON.stringify(users));
-}
-
-export function authRoleToUserRole(role: AuthRole): UserRole {
-  if (role === 'Tester') return 'Admin_Tested';
-  if (role === 'Reviewer') return 'Admin_Reviewed';
-  return 'Admin_Authorized';
-}
-
-export function registerLocalUser(input: {
-  name: string;
-  username: string;
-  password: string;
-  role: AuthRole;
-}): LocalUser {
-  const username = input.username.trim().toLowerCase();
-  const users = loadLocalUsers();
-  if (users.some(u => u.username === username)) {
-    throw new Error('Username already exists');
-  }
-
-  const user: LocalUser = {
-    id: newId(),
-    name: input.name.trim(),
-    username,
-    password: input.password,
-    role: input.role,
-    createdAt: Date.now(),
-  };
-  saveLocalUsers([user, ...users]);
-  return user;
-}
-
-export function loginLocalUser(input: {
-  username: string;
-  password: string;
-  role: AuthRole;
-}): LocalUser | null {
-  const username = input.username.trim().toLowerCase();
-  const user = loadLocalUsers().find(
-    u => u.username === username && u.password === input.password && u.role === input.role
-  );
-  return user || null;
-}
-
-export function listLocalUsers(): Array<Omit<LocalUser, 'password'>> {
-  return loadLocalUsers().map(({ password: _password, ...user }) => user);
-}
-
-export function updateLocalUser(
-  userId: string,
-  patch: { name?: string; username?: string; role?: AuthRole; password?: string }
-): Omit<LocalUser, 'password'> {
-  const users = loadLocalUsers();
-  const idx = users.findIndex(u => u.id === userId);
-  if (idx < 0) throw new Error('User not found');
-
-  const existing = users[idx];
-  const username =
-    patch.username !== undefined ? patch.username.trim().toLowerCase() : existing.username;
-  if (username !== existing.username && users.some(u => u.username === username && u.id !== userId)) {
-    throw new Error('Username already exists');
-  }
-
-  const next: LocalUser = {
-    ...existing,
-    name: patch.name !== undefined ? patch.name.trim() : existing.name,
-    username,
-    role: patch.role || existing.role,
-    password: patch.password ? patch.password : existing.password,
-  };
-  users[idx] = next;
-  saveLocalUsers(users);
-  const { password: _password, ...publicUser } = next;
-  return publicUser;
-}
-
-export function deleteLocalUser(userId: string, actorId?: string): boolean {
-  const users = loadLocalUsers();
-  const existing = users.find(u => u.id === userId);
-  if (!existing) return false;
-  if (actorId && existing.id === actorId) {
-    throw new Error('You cannot delete your own account');
-  }
-  if (existing.role === 'Authorizer') {
-    const authorizerCount = users.filter(u => u.role === 'Authorizer').length;
-    if (authorizerCount <= 1) {
-      throw new Error('Cannot delete the last Authorizer account');
-    }
-  }
-  saveLocalUsers(users.filter(u => u.id !== userId));
-  return true;
 }
 
 const NOTIFICATIONS_KEY = 'volttrack_local_notifications_v1';
@@ -539,6 +429,13 @@ export type AppNotification = {
   createdAt: number;
   read: boolean;
 };
+
+function newId() {
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
+    return crypto.randomUUID();
+  }
+  return `n-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
 
 function loadNotifications(): AppNotification[] {
   try {

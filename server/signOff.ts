@@ -135,6 +135,37 @@ export const clearSignOffOnReject = (
   }
 };
 
+/** Observation keys used for rejection notes (synced with frontend). */
+export const REJECTION_FIELD_KEYS = [
+  'rejection_note',
+  'rejection_by',
+  'rejection_at',
+  'rejection_from_stage',
+  'rejection_to_stage',
+] as const;
+
+export const clearRejectionFields = (observationData: Record<string, string>) => {
+  for (const key of REJECTION_FIELD_KEYS) {
+    delete observationData[key];
+  }
+};
+
+export const applyRejectionFields = (
+  observationData: Record<string, string>,
+  input: {
+    note: string;
+    by: string;
+    fromStage: string;
+    toStage: string;
+  }
+) => {
+  observationData.rejection_note = input.note;
+  observationData.rejection_by = input.by;
+  observationData.rejection_at = new Date().toLocaleString();
+  observationData.rejection_from_stage = input.fromStage;
+  observationData.rejection_to_stage = input.toStage;
+};
+
 /** Reviewer cannot change Technician / Authorizer; Tester cannot change Reviewer / Authorizer. */
 export const applyRoleSignOffLocks = (
   testName: string,
