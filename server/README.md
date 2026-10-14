@@ -92,6 +92,58 @@ Powers the **Registered Staff** page (list / edit / delete) and Add Staff form.
 - Reviewers: GAURAV KUREKAR, KAPIL GAUTAM, HEMANT BHAGAT, PANKAJ KAWALE
 - Authorizers: KIRAN JOHARAPURKAR, SHREYAS BHAVE, VIKAS CHAUHAN
 
+## Maintenance scripts
+
+Run from the repo root (on the VPS: `/var/www/volttrack-api/testing`). Both read
+`MONGODB_URI` from `.env` and support `--dry-run`.
+
+### Create a staff account (`createAuthorizer.ts`)
+
+The API intentionally has **no path** for creating an `Authorizer` after the first
+one — `POST /auth/register` allows an Authorizer to create only Tester/Reviewer,
+and `PATCH /users/:userId` refuses to promote staff to Authorizer. That is a
+security control (Authorizer is the final approval tier), so it is not relaxed.
+This script is the deliberate, auditable way to onboard a new Authorizer.
+
+Passwords are bcrypt hashed, so inserting a user by hand in `mongosh` produces an
+account that **can never log in**. This script reuses the real `hashPassword()`
+helper, so the document is identical to one created through the API.
+
+```bash
+# list existing users (username / role / name)
+npx tsx server/scripts/createAuthorizer.ts --list
+
+# preview, then apply
+npx tsx server/scripts/createAuthorizer.ts \
+  --name "SHREYAS BHAVE" --username shreyas --password "<secret>" --dry-run
+npx tsx server/scripts/createAuthorizer.ts \
+  --name "SHREYAS BHAVE" --username shreyas --password "<secret>"
+```
+
+Flags: `--name`, `--username` (lowercased, must be unique), `--password` (min 4),
+`--role` (`Tester`|`Reviewer`|`Authorizer`, default `Authorizer`), `--dry-run`, `--list`.
+
+Refuses to run if the username already exists. No `pm2 restart` needed — users are
+read per request.
+
+> Note: the **sign-off dropdown** names are a separate thing — they come from the
+> hardcoded lists in `signOff.ts` / `App.tsx` (see above), not from the `users`
+> collection. Creating a login account does **not** add a name to those dropdowns,
+> and vice versa.
+
+### Repair job statuses (`backfillJobStatus.ts`)
+
+Recomputes every job's stored `status` from its tests via `recomputeJobStatus()`.
+Needed because `status` is persisted, not derived on read — so jobs saved by older
+code can be stuck on `Processing` after being fully authorized.
+
+```bash
+npx tsx server/scripts/backfillJobStatus.ts --dry-run
+npx tsx server/scripts/backfillJobStatus.ts
+```
+
+Idempotent — safe to re-run.
+
 ## Storage
 
 MongoDB collections:
