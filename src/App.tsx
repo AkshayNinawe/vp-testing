@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, createContext, useContext } from 'react';
+﻿import React, { useState, useEffect, useRef, createContext, useContext } from 'react';
 import { 
   LogIn, 
   Settings, 
@@ -142,7 +142,7 @@ const AUTO_8MVA_RATING_DEFAULTS: Record<string, string> = {
   rating_core_wdg: '7350 kG',
   rating_taps: 'NA',
   rating_impedance: '0.49 %',
-  rating_temp_rise: '40/50 °C',
+  rating_temp_rise: '40/50 Â°C',
   rating_transport_wt: '13375 KG (WITH OIL)',
   rating_radiators: '4 NOS',
 };
@@ -159,7 +159,7 @@ const AUTO_12_3MVA_RATING_DEFAULTS: Record<string, string> = {
   rating_core_wdg: '10200 kG',
   rating_taps: 'NA',
   rating_impedance: '0.49 %',
-  rating_temp_rise: '40/50 °C',
+  rating_temp_rise: '40/50 Â°C',
   rating_transport_wt: '17259 KG (WITH OIL)',
   rating_radiators: '4 NOS',
 };
@@ -176,7 +176,7 @@ const AUTO_16_5MVA_RATING_DEFAULTS: Record<string, string> = {
   rating_core_wdg: '12275 kG',
   rating_taps: 'NA',
   rating_impedance: '0.55 %',
-  rating_temp_rise: '40/50 °C',
+  rating_temp_rise: '40/50 Â°C',
   rating_transport_wt: '19845 KG (WITH OIL)',
   rating_radiators: '4 NOS',
 };
@@ -247,7 +247,7 @@ const getJobRatingNameplateFields = (job: Job) => {
     {
       label: isAutoNameplate
         ? '11. Permissible Temp rise over Amb. Oil /Winding'
-        : '11. Permissible Temp rise (°C)',
+        : '11. Permissible Temp rise (Â°C)',
       value: rating.rating_temp_rise,
     },
     { label: '12. Transport weight', value: rating.rating_transport_wt },
@@ -565,6 +565,33 @@ const getRejectionMeta = (test: TransformerTest) => {
 const isTestCompleted = (test: TransformerTest) =>
   test.stage === 'Authorized' && !!getSelectedAuthorizer(test);
 
+/**
+ * Weighted progress per stage. Each accepted test contributes partial credit so the
+ * badge moves as work advances (submit -> review -> authorize) instead of only at the end.
+ */
+const STAGE_WEIGHT: Record<TestStage, number> = {
+  'Not Started': 0,
+  'Tested': 1 / 3,
+  'Reviewed': 2 / 3,
+  'Authorized': 1,
+};
+
+/**
+ * Single source of truth for the Overall Progress badge.
+ * `authorized` = fully signed off; `percent` = weighted across all 3 stages.
+ * Only accepted tests count (unaccepted offers are not part of the job yet).
+ */
+const jobProgress = (tests: TransformerTest[]) => {
+  const active = tests.filter(t => t.accepted !== false);
+  const authorized = active.filter(t => t.stage === 'Authorized').length;
+  const weighted = active.reduce((sum, t) => sum + (STAGE_WEIGHT[t.stage] ?? 0), 0);
+  return {
+    total: active.length,
+    authorized,
+    percent: active.length > 0 ? Math.round((weighted / active.length) * 100) : 0,
+  };
+};
+
 /** HV Testing reports stay Reviewer-locked after Authorizer approval. */
 const isHvTestingReport = (test: { name: string }) =>
   test.name.trim().toUpperCase() === 'LIST OF HV TEST';
@@ -747,7 +774,7 @@ function JobRatingForm({ job, onUpdate, currentRole = 'Admin_Tested' }: { job: J
           <Field id="rating_core_wdg" pdfValue={ratingDefaults.rating_core_wdg} label="8. Core + Winding (kG)" />
           <Field id="rating_taps" pdfValue={ratingDefaults.rating_taps} label="9. No. of Taps" />
           <Field id="rating_impedance" pdfValue={ratingDefaults.rating_impedance} label="10. % impedance (%)" />
-          <Field id="rating_temp_rise" pdfValue={ratingDefaults.rating_temp_rise} label={isAutoNameplate ? '11. Permissible Temp rise over Amb. Oil /Winding' : '11. Permissible Temp rise (°C)'} />
+          <Field id="rating_temp_rise" pdfValue={ratingDefaults.rating_temp_rise} label={isAutoNameplate ? '11. Permissible Temp rise over Amb. Oil /Winding' : '11. Permissible Temp rise (Â°C)'} />
           <Field id="rating_transport_wt" pdfValue={ratingDefaults.rating_transport_wt} label="12. Transport weight" />
           {!isAutoNameplate && (
             <Field id="rating_dimensions" label="13. Length * Width * Height" placeholder="L x W x H" />
@@ -904,7 +931,7 @@ function CTTestForm({ test, job, onUpdate }: { test: TransformerTest, job?: Job,
                   <span className="text-[10px] font-bold uppercase text-industrial-text-muted">Resistance:</span>
                   <div className="flex-1 flex items-center justify-between gap-1">
                     <Field id={`res_${section}`} placeholder="Value" className="flex-1 text-left" />
-                    <span className="text-sm font-bold text-industrial-accent mr-1">Ω</span>
+                    <span className="text-sm font-bold text-industrial-accent mr-1">Î©</span>
                   </div>
                 </div>
               </div>
@@ -937,7 +964,7 @@ function BushingTestForm({ test, onUpdate }: { test: TransformerTest, onUpdate: 
       {/* Header Info */}
       <section className="grid grid-cols-1 md:grid-cols-2 gap-4 bg-industrial-bg/10 p-6 rounded-xl border border-industrial-border">
         <div className="space-y-4">
-          <Field id="bushing_make" label="Temp (°C)" className="text-left" />
+          <Field id="bushing_make" label="Temp (Â°C)" className="text-left" />
           <Field id="bushing_sr_no" label="Humidity(%)" className="text-left" />
         </div>
         <div className="space-y-4">
@@ -1117,7 +1144,7 @@ function PostConnectionTestForm({ test, job, onUpdate }: { test: TransformerTest
       calculateImpedance(updated);
     }
 
-    // Auto calculate winding resistance @ 75°C
+    // Auto calculate winding resistance @ 75Â°C
     if (key === 'pct_res_wdg_temp' || key === 'pct_res_amb_temp' || (key.startsWith('pct_res_') && key.endsWith('_amb'))) {
       let windingT = parseFloat(updated['pct_res_wdg_temp'] || '');
       if (isNaN(windingT)) {
@@ -1156,9 +1183,9 @@ function PostConnectionTestForm({ test, job, onUpdate }: { test: TransformerTest
            <div className="grid grid-cols-2 gap-4 bg-industrial-bg/5 p-4 rounded-lg border border-industrial-border">
               <Field id="pct_date" type="date" label="Date" />
               <Field id="pct_time" type="time" label="Time" />
-              <Field id="pct_amb_temp" label="Amb. Temp (⁰C)" />
-              <Field id="pct_wdg_temp" label="Wdg. Temp (⁰C)" />
-              <Field id="pct_core_temp" label="Core Temp (⁰C)" />
+              <Field id="pct_amb_temp" label="Amb. Temp (â°C)" />
+              <Field id="pct_wdg_temp" label="Wdg. Temp (â°C)" />
+              <Field id="pct_core_temp" label="Core Temp (â°C)" />
               <Field id="pct_humidity" label="Relative Humidity (%)" />
            </div>
            <div className="bg-industrial-bg/10 p-4 rounded-lg border border-industrial-border">
@@ -1180,8 +1207,8 @@ function PostConnectionTestForm({ test, job, onUpdate }: { test: TransformerTest
             <thead className="bg-[#f8fafc] text-industrial-text-muted uppercase">
               <tr>
                 <th className="p-4 border-r border-b border-industrial-border text-left">Combination</th>
-                <th className="p-4 border-r border-b border-industrial-border text-center">15 Sec (MΩ)</th>
-                <th className="p-4 border-r border-b border-industrial-border text-center">60 Sec (MΩ)</th>
+                <th className="p-4 border-r border-b border-industrial-border text-center">15 Sec (Mâ„¦)</th>
+                <th className="p-4 border-r border-b border-industrial-border text-center">60 Sec (Mâ„¦)</th>
                 <th className="p-4 border-b border-industrial-border text-center">Ratio (60/15s)</th>
               </tr>
             </thead>
@@ -1434,7 +1461,7 @@ function PostConnectionTestForm({ test, job, onUpdate }: { test: TransformerTest
           <div className="space-y-4">
              <h6 className="text-[10px] font-bold text-industrial-accent uppercase tracking-widest border-b pb-1">Test Parameters & Schedule</h6>
              <div className="grid grid-cols-3 gap-4">
-                <Field id="pct_sc_applied" label="Applied Voltages" placeholder="1Φ 20 VOLT APPLIED" />
+                <Field id="pct_sc_applied" label="Applied Voltages" placeholder="1Î¦ 20 VOLT APPLIED" />
                 <Field id="pct_sc_date" type="date" label="Test Date" />
                 <Field id="pct_sc_time" type="time" label="Test Time" />
              </div>
@@ -1446,7 +1473,7 @@ function PostConnectionTestForm({ test, job, onUpdate }: { test: TransformerTest
             <thead>
               <tr className="bg-blue-100/85 text-industrial-text font-bold uppercase tracking-wider text-xs border-b border-industrial-border">
                 <th className="p-3 border-r border-industrial-border text-center font-black">TEMINALS</th>
-                <th className="p-3 border-r border-industrial-border text-center font-black">APPLIED VOLTAGE (V)<br/><span className="text-[10px] font-normal lowercase italic">(1Φ 20 VOLT APPLIED )</span></th>
+                <th className="p-3 border-r border-industrial-border text-center font-black">APPLIED VOLTAGE (V)<br/><span className="text-[10px] font-normal lowercase italic">(1Î¦ 20 VOLT APPLIED )</span></th>
                 <th className="p-2 border-r border-industrial-border text-center font-black">MEASURED CURRENT (A)</th>
                 <th className="p-2 text-center font-black">MEASURED CURRENT (A)</th>
               </tr>
@@ -1543,9 +1570,9 @@ function PostConnectionTestForm({ test, job, onUpdate }: { test: TransformerTest
           <div className="space-y-4">
              <h6 className="text-[10px] font-bold text-industrial-accent uppercase tracking-widest border-b pb-1">Test Environment & Details</h6>
              <div className="grid grid-cols-4 gap-2">
-                <Field id="pct_res_wdg_temp" label="Wdg Temp (°C)" />
-                <Field id="pct_res_core_temp" label="Core Temp (°C)" />
-                <Field id="pct_res_amb_temp" label="Ambient (°C)" />
+                <Field id="pct_res_wdg_temp" label="Wdg Temp (Â°C)" />
+                <Field id="pct_res_core_temp" label="Core Temp (Â°C)" />
+                <Field id="pct_res_amb_temp" label="Ambient (Â°C)" />
                 <Field id="pct_res_humidity" label="Humidity (%)" />
              </div>
           </div>
@@ -1557,15 +1584,15 @@ function PostConnectionTestForm({ test, job, onUpdate }: { test: TransformerTest
               <tr>
                 <th className="p-4 border-r border-b border-industrial-border text-left">TEMINALS</th>
                 <th className="p-4 border-r border-b border-industrial-border text-center">
-                  <div>Measured Resistance (Ω)</div>
+                  <div>Measured Resistance (Î©)</div>
                 </th>
                 <th className="p-4 border-r border-b border-industrial-border text-center bg-orange-50 text-orange-800">
-                  <div>RESISTANCE @75°C</div>
-                  <div className="text-[10px] font-bold text-orange-800 mt-1">Ω</div>
+                  <div>RESISTANCE @75Â°C</div>
+                  <div className="text-[10px] font-bold text-orange-800 mt-1">Î©</div>
                 </th>
                 <th className="p-4 border-b border-industrial-border text-center">
-                  <div>MAX. GUARANTEED @75°C</div>
-                  <div className="text-[10px] font-bold text-industrial-text-muted mt-1">Ω</div>
+                  <div>MAX. GUARANTEED @75Â°C</div>
+                  <div className="text-[10px] font-bold text-industrial-text-muted mt-1">Î©</div>
                 </th>
               </tr>
             </thead>
@@ -1833,9 +1860,9 @@ function PostTankingTestForm({ test, job, onUpdate }: { test: TransformerTest, j
            <div className="grid grid-cols-2 gap-4 bg-industrial-bg/5 p-4 rounded-lg border border-industrial-border">
               <Field id="pt_date" type="date" label="Date" />
               <Field id="pt_time" type="time" label="Time" />
-              <Field id="pt_amb_temp" label="Amb. Temp (⁰C)" />
-              <Field id="pt_wdg_temp" label="Wdg. Temp (⁰C)" />
-              <Field id="pt_core_temp" label="Core Temp (⁰C)" />
+              <Field id="pt_amb_temp" label="Amb. Temp (â°C)" />
+              <Field id="pt_wdg_temp" label="Wdg. Temp (â°C)" />
+              <Field id="pt_core_temp" label="Core Temp (â°C)" />
               <Field id="pt_humidity" label="Relative Humidity (%)" />
            </div>
            <div className="bg-industrial-bg/10 p-4 rounded-lg border border-industrial-border">
@@ -1854,8 +1881,8 @@ function PostTankingTestForm({ test, job, onUpdate }: { test: TransformerTest, j
             <thead className="bg-[#f8fafc] text-industrial-text-muted uppercase">
               <tr>
                 <th className="p-4 border-r border-b border-industrial-border text-left">Combination</th>
-                <th className="p-4 border-r border-b border-industrial-border text-center">15 Sec (MΩ)</th>
-                <th className="p-4 border-r border-b border-industrial-border text-center">60 Sec (MΩ)</th>
+                <th className="p-4 border-r border-b border-industrial-border text-center">15 Sec (Mâ„¦)</th>
+                <th className="p-4 border-r border-b border-industrial-border text-center">60 Sec (Mâ„¦)</th>
                 <th className="p-4 border-b border-industrial-border text-center">Ratio of 60 Sec/ 15 Sec</th>
               </tr>
             </thead>
@@ -1889,7 +1916,7 @@ function PostTankingTestForm({ test, job, onUpdate }: { test: TransformerTest, j
                   <td className="p-1 border-r border-industrial-border">
                     <Field id={`pt_ir_${row.key}`} placeholder="" className="text-center" />
                   </td>
-                  <td className="p-3 text-center text-industrial-text-muted w-16">(MΩ)</td>
+                  <td className="p-3 text-center text-industrial-text-muted w-16">(MÎ©)</td>
                 </tr>
               ))}
             </tbody>
@@ -1955,7 +1982,7 @@ function PostTankingTestForm({ test, job, onUpdate }: { test: TransformerTest, j
             </tbody>
           </table>
           <div className="p-4 bg-slate-50 border-t border-industrial-border text-[11px] font-semibold text-industrial-text-muted flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-            <span>Allowable deviation is ±0.5% as per IS 2026 / IEC 60076</span>
+            <span>Allowable deviation is Â±0.5% as per IS 2026 / IEC 60076</span>
             <span className="italic text-industrial-accent">Formula: % Deviation = ((Measured Ratio - Cal. Ratio) / Cal. Ratio) * 100</span>
           </div>
         </div>
@@ -2114,7 +2141,7 @@ function PostTankingTestForm({ test, job, onUpdate }: { test: TransformerTest, j
               APPLIED VOLTAGE (V) :
             </div>
             <div className="p-1 border-r border-[#cbd5e1] col-span-1">
-              <Field id="pt_sc_applied" placeholder="1Φ 20 VOLT APPLIED" />
+              <Field id="pt_sc_applied" placeholder="1Î¦ 20 VOLT APPLIED" />
             </div>
             <div className="p-2 bg-slate-50 border-r border-[#cbd5e1] font-bold text-right pr-2 col-span-1">
               DATE :
@@ -2246,7 +2273,7 @@ function PostTankingTestForm({ test, job, onUpdate }: { test: TransformerTest, j
           <div className="grid grid-cols-1 md:grid-cols-5 gap-6">
              <Field id="pt_res_meter_make" placeholder="PRESTIGE ELECTRONICS" label="Meter Make" />
              <Field id="pt_res_meter_sr_no" placeholder="PE/12-JAN/09" label="Sr. No." />
-             <Field id="pt_res_range" placeholder="1999.9 μΩ-19.999Ω" label="Measurement Range" />
+             <Field id="pt_res_range" placeholder="1999.9 Î¼â„¦-19.999â„¦" label="Measurement Range" />
              <Field id="pt_res_date" type="date" label="Date" />
              <Field id="pt_res_time" type="time" label="Time" />
           </div>
@@ -2258,19 +2285,19 @@ function PostTankingTestForm({ test, job, onUpdate }: { test: TransformerTest, j
             <Field 
               id="pt_wdg_temp_res" 
               placeholder="" 
-              label="WDG TEMP (°C)" 
+              label="WDG TEMP (Â°C)" 
               className="[&>span]:text-slate-500 [&>span]:font-black [&>span]:tracking-wider [&>span]:mb-1.5 [&>input]:bg-white [&>input]:border [&>input]:border-slate-200 [&>input]:rounded-lg [&>input]:p-3 [&>input]:shadow-sm"
             />
             <Field 
               id="pt_core_temp_res" 
               placeholder="" 
-              label="CORE TEMP (°C)" 
+              label="CORE TEMP (Â°C)" 
               className="[&>span]:text-slate-500 [&>span]:font-black [&>span]:tracking-wider [&>span]:mb-1.5 [&>input]:bg-white [&>input]:border [&>input]:border-slate-200 [&>input]:rounded-lg [&>input]:p-3 [&>input]:shadow-sm"
             />
             <Field 
               id="pt_amb_temp_res" 
               placeholder="" 
-              label="AMBIENT TEMP (°C)" 
+              label="AMBIENT TEMP (Â°C)" 
               className="[&>span]:text-slate-500 [&>span]:font-black [&>span]:tracking-wider [&>span]:mb-1.5 [&>input]:bg-white [&>input]:border [&>input]:border-slate-200 [&>input]:rounded-lg [&>input]:p-3 [&>input]:shadow-sm"
             />
             <Field 
@@ -2288,15 +2315,15 @@ function PostTankingTestForm({ test, job, onUpdate }: { test: TransformerTest, j
               <tr>
                 <th className="p-3 border-r border-b border-industrial-border text-left font-black">TEMINALS</th>
                 <th className="p-3 border-r border-b border-industrial-border text-center font-black">
-                  <div>Measured Resistance (Ω)</div>
+                  <div>Measured Resistance (Î©)</div>
                 </th>
                 <th className="p-3 border-r border-b border-industrial-border text-center bg-orange-50/60 text-orange-800 font-black">
-                  <div>RESISTANCE @75°C</div>
-                  <div className="text-[10px] font-normal text-orange-500">Ω</div>
+                  <div>RESISTANCE @75Â°C</div>
+                  <div className="text-[10px] font-normal text-orange-500">â„¦</div>
                 </th>
                 <th className="p-3 border-b border-industrial-border text-center font-black">
-                  <div>MAX. GUARANTEED @75°C</div>
-                  <div className="text-[10px] font-normal text-slate-400">Ω</div>
+                  <div>MAX. GUARANTEED @75Â°C</div>
+                  <div className="text-[10px] font-normal text-slate-400">â„¦</div>
                 </th>
               </tr>
             </thead>
@@ -2341,7 +2368,7 @@ function PostTankingTestForm({ test, job, onUpdate }: { test: TransformerTest, j
               <th className="p-3 border-r border-b border-industrial-border text-center">Connection</th>
               <th className="p-3 border-r border-b border-industrial-border text-center normal-case">Applied Voltage</th>
               <th className="p-3 border-r border-b border-industrial-border text-center">Duration</th>
-              <th className="p-3 border-r border-b border-industrial-border text-center bg-white">MΩ</th>
+              <th className="p-3 border-r border-b border-industrial-border text-center bg-white">MÎ©</th>
               <th className="p-3 border-b border-industrial-border text-center bg-white">Continuity</th>
             </tr>
           </thead>
@@ -2622,7 +2649,7 @@ function HVTestListForm({ test, job, onUpdate }: { test: TransformerTest, job?: 
                   </td>
                   <td className="p-2.5 border-r border-b border-industrial-border font-bold bg-industrial-bg/5 text-center w-[15%]">PT RATIO</td>
                   <td className="p-1 border-r border-b border-industrial-border text-center w-[22%]">
-                    <Field id="hv_nll_pt_ratio" pdfValue="33000/√3/110/√3 V" className="text-center font-bold" />
+                    <Field id="hv_nll_pt_ratio" pdfValue="33000/âˆš3/110/âˆš3 V" className="text-center font-bold" />
                   </td>
                   <td className="p-2.5 border-r border-b border-industrial-border font-bold bg-industrial-bg/5 text-center w-[10%]">MF</td>
                   <td className="p-1 border-b border-industrial-border text-center w-[20%]">
@@ -2846,7 +2873,7 @@ function HVTestListForm({ test, job, onUpdate }: { test: TransformerTest, job?: 
                   </td>
                   <td className="p-2 border-r border-b border-industrial-border font-bold bg-slate-50 text-center" style={{ width: '15%' }}>PT RATIO</td>
                   <td className="p-2 border-r border-b border-industrial-border text-center font-bold text-slate-800" style={{ width: '22%' }}>
-                    <Field id="hv_ll_pt" pdfValue="1100/√3/110/V3" className="text-center font-bold" />
+                    <Field id="hv_ll_pt" pdfValue="1100/âˆš3/110/V3" className="text-center font-bold" />
                   </td>
                   <td className="p-2 border-r border-b border-industrial-border font-bold bg-slate-50 text-center" style={{ width: '10%' }}>MF</td>
                   <td className="p-2 border-b border-industrial-border text-center font-bold text-slate-800" style={{ width: '20%' }}>
@@ -2893,23 +2920,23 @@ function HVTestListForm({ test, job, onUpdate }: { test: TransformerTest, job?: 
             <table className="w-full text-xs border border-industrial-border border-collapse font-mono" style={{ tableLayout: 'fixed' }}>
               <tbody>
                 <tr>
-                  <td className="p-2 border-r border-industrial-border font-bold bg-slate-50 text-left whitespace-nowrap">OTI (°C) :</td>
+                  <td className="p-2 border-r border-industrial-border font-bold bg-slate-50 text-left whitespace-nowrap">OTI (Â°C) :</td>
                   <td className="p-1 border-r border-industrial-border text-center font-medium text-slate-800">
                     <Field id="hv_ll_oti" pdfValue="0" className="text-center font-mono font-bold" />
                   </td>
-                  <td className="p-2 border-r border-industrial-border font-bold bg-slate-50 text-left whitespace-nowrap">WTI (°C):</td>
+                  <td className="p-2 border-r border-industrial-border font-bold bg-slate-50 text-left whitespace-nowrap">WTI (Â°C):</td>
                   <td className="p-1 border-r border-industrial-border text-center font-medium text-slate-800">
                     <Field id="hv_ll_wti" pdfValue="0" className="text-center font-mono font-bold" />
                   </td>
-                  <td className="p-2 border-r border-industrial-border font-bold bg-slate-50 text-left whitespace-nowrap">TOP OIL (°C) :</td>
+                  <td className="p-2 border-r border-industrial-border font-bold bg-slate-50 text-left whitespace-nowrap">TOP OIL (Â°C) :</td>
                   <td className="p-1 border-r border-industrial-border text-center font-medium text-slate-800">
                     <Field id="hv_ll_top_oil" pdfValue="25" className="text-center font-mono font-bold" />
                   </td>
-                  <td className="p-2 border-r border-industrial-border font-bold bg-slate-50 text-left whitespace-nowrap">BOTTOM OIL (°C) :</td>
+                  <td className="p-2 border-r border-industrial-border font-bold bg-slate-50 text-left whitespace-nowrap">BOTTOM OIL (Â°C) :</td>
                   <td className="p-1 border-r border-industrial-border text-center font-medium text-slate-800">
                     <Field id="hv_ll_bottom_oil" pdfValue="25" className="text-center font-mono font-bold" />
                   </td>
-                  <td className="p-2 border-r border-industrial-border font-bold bg-slate-50 text-left whitespace-nowrap">AVG OIL (°C) :</td>
+                  <td className="p-2 border-r border-industrial-border font-bold bg-slate-50 text-left whitespace-nowrap">AVG OIL (Â°C) :</td>
                   <td className="p-1 text-center font-medium text-slate-800">
                     <Field id="hv_ll_avg_oil" pdfValue="25" className="text-center font-mono font-bold text-industrial-accent" />
                   </td>
@@ -2973,9 +3000,9 @@ function HVTestListForm({ test, job, onUpdate }: { test: TransformerTest, job?: 
                       <th className="p-2 border-r border-industrial-border" style={{ width: '8%' }}>METER READING LOSSES W</th>
                       <th className="p-2 border-r border-industrial-border" style={{ width: '9%' }}>LOAD LOSSES CORRECTED TO RATED CURRENT kW</th>
                       <th className="p-2 border-r border-industrial-border" style={{ width: '6%' }}>% Z</th>
-                      <th className="p-2 border-r border-industrial-border" style={{ width: '9%' }}>MAX. GUARANTEED LOSSES ACCORDING TO RDSO SOGP AT 75°C</th>
-                      <th className="p-2 border-r border-industrial-border" style={{ width: '9%' }}>MAX. GUARANTEED IMPEDANCE IN % ACCORDING TO RDSO SOGP AT 75°C</th>
-                      <th className="p-2 border-industrial-border" style={{ width: '9%' }}>MAX. GUARANTEED LEAKAGE IMPEDANCE IN OHMS ACCORDING TO RDSO SOGP AT 75°C</th>
+                      <th className="p-2 border-r border-industrial-border" style={{ width: '9%' }}>MAX. GUARANTEED LOSSES ACCORDING TO RDSO SOGP AT 75Â°C</th>
+                      <th className="p-2 border-r border-industrial-border" style={{ width: '9%' }}>MAX. GUARANTEED IMPEDANCE IN % ACCORDING TO RDSO SOGP AT 75Â°C</th>
+                      <th className="p-2 border-industrial-border" style={{ width: '9%' }}>MAX. GUARANTEED LEAKAGE IMPEDANCE IN OHMS ACCORDING TO RDSO SOGP AT 75Â°C</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -3038,11 +3065,11 @@ function HVTestListForm({ test, job, onUpdate }: { test: TransformerTest, job?: 
                 </div>
                 <div className="text-[10px] text-slate-600 space-y-1 bg-white p-3 rounded border border-industrial-border leading-relaxed">
                   <div><span className="font-bold">Meter Reading Voltage:</span> U1 + U3</div>
-                  <div><span className="font-bold">Measured Voltage:</span> Meter Reading Voltage × 10</div>
+                  <div><span className="font-bold">Measured Voltage:</span> Meter Reading Voltage Ã— 10</div>
                   <div><span className="font-bold">Meter Reading Current:</span> (I1 + I3) / 2</div>
-                  <div><span className="font-bold">Applied Current:</span> Meter Reading Current × {hvLlConfig.ctFactor}</div>
-                  <div><span className="font-bold">Loss Corrected Formula:</span> Pc = (Meter_W × {hvLlConfig.mf} / 1000) × ({hvLlConfig.ratedA} / Applied_I)²</div>
-                  <div><span className="font-bold">Percentage Impedance Formula:</span> %Z = (Measured_V / 55000) × ({hvLlConfig.ratedA} / Applied_I) × 100</div>
+                  <div><span className="font-bold">Applied Current:</span> Meter Reading Current Ã— {hvLlConfig.ctFactor}</div>
+                  <div><span className="font-bold">Loss Corrected Formula:</span> Pc = (Meter_W Ã— {hvLlConfig.mf} / 1000) Ã— ({hvLlConfig.ratedA} / Applied_I)Â²</div>
+                  <div><span className="font-bold">Percentage Impedance Formula:</span> %Z = (Measured_V / 55000) Ã— ({hvLlConfig.ratedA} / Applied_I) Ã— 100</div>
                 </div>
               </div>
             </div>
@@ -3247,7 +3274,7 @@ function ChecklistForTFRBeforeHV({ test, onUpdate }: { test: TransformerTest, on
 
   const CHECKLIST_ITEMS = [
     "BDV of oil main tank and moisture content of oil for sample taken from main tank bottom.",
-    "IR VALUES of windings at 60 sec. (MΩ)",
+    "IR VALUES of windings at 60 sec. (MÎ©)",
     "IR VALUES of Bushing WRT Test tap at 60 sec",
     "Air venting from main tank and all other parts such as turrets, bushings, radaitors.",
     "Radiators IF fitted for heat run test",
@@ -3319,11 +3346,11 @@ function ChecklistForTFRBeforeHV({ test, onUpdate }: { test: TransformerTest, on
                     ) : idx === 2 ? (
                       <div className="flex flex-col gap-2 p-1 text-[11px]">
                         <div className="flex items-center gap-2">
-                          <span className="font-semibold text-slate-600 w-20 text-right">1.1 (MΩ) :</span>
+                          <span className="font-semibold text-slate-600 w-20 text-right">1.1 (MÎ©) :</span>
                           <Field id="chk_val_3_1_1" placeholder="NA" className="text-center font-mono py-1 px-2 border border-slate-200 rounded w-28 bg-white focus:border-blue-500" />
                         </div>
                         <div className="flex items-center gap-2">
-                          <span className="font-semibold text-slate-600 w-20 text-right">2 (MΩ) :</span>
+                          <span className="font-semibold text-slate-600 w-20 text-right">2 (MÎ©) :</span>
                           <Field id="chk_val_3_2" placeholder="NA" className="text-center font-mono py-1 px-2 border border-slate-200 rounded w-28 bg-white focus:border-blue-500" />
                         </div>
                       </div>
@@ -3455,7 +3482,7 @@ function PreConnectionTestForm({ test, job, onUpdate }: { test: TransformerTest,
       }
     });
 
-    // Auto calculate winding resistance @ 75°C
+    // Auto calculate winding resistance @ 75Â°C
     if (key === 'res_env_wdg' || key === 'res_env_ambient' || (key.startsWith('res_winding_') && key.endsWith('_amb'))) {
       let windingT = parseFloat(updated['res_env_wdg'] || '');
       if (isNaN(windingT)) {
@@ -3534,8 +3561,8 @@ function PreConnectionTestForm({ test, job, onUpdate }: { test: TransformerTest,
             <thead className="bg-[#f8fafc] text-industrial-text-muted uppercase">
               <tr>
                 <th className="p-4 border-r border-b border-industrial-border text-left">COMBINATION</th>
-                <th className="p-4 border-r border-b border-industrial-border text-center">15 Sec (MΩ)</th>
-                <th className="p-4 border-r border-b border-industrial-border text-center">60 Sec (MΩ)</th>
+                <th className="p-4 border-r border-b border-industrial-border text-center">15 Sec (Mâ„¦)</th>
+                <th className="p-4 border-r border-b border-industrial-border text-center">60 Sec (Mâ„¦)</th>
                 <th className="p-4 border-b border-industrial-border text-center">Ratio (60s/15s)</th>
               </tr>
             </thead>
@@ -3748,7 +3775,7 @@ function PreConnectionTestForm({ test, job, onUpdate }: { test: TransformerTest,
                 <th className="p-4 border-r border-b border-industrial-border text-left">TEMINALS</th>
                 <th className="p-4 border-r border-b border-industrial-border text-center uppercase">
                   <div>APPLIED VOLTAGE (V)</div>
-                  <div className="text-[10px] font-bold text-industrial-text-muted mt-1 normal-case">(1Φ 200VOLT APPLIED )</div>
+                  <div className="text-[10px] font-bold text-industrial-text-muted mt-1 normal-case">(1Î¦ 200VOLT APPLIED )</div>
                 </th>
                 <th className="p-4 border-b border-industrial-border text-center">MEASURED CURRENT <span className="normal-case">(mA)</span></th>
               </tr>
@@ -3799,15 +3826,15 @@ function PreConnectionTestForm({ test, job, onUpdate }: { test: TransformerTest,
 
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 bg-industrial-bg/5 p-6 rounded-xl border border-industrial-border">
           <div className="flex flex-col gap-1">
-            <span className="text-[10px] font-bold text-industrial-text-muted uppercase">Wdg Temp (°C)</span>
+            <span className="text-[10px] font-bold text-industrial-text-muted uppercase">Wdg Temp (Â°C)</span>
             <input type="text" className="bg-white border border-industrial-border rounded p-2 text-sm font-bold outline-none focus:border-industrial-accent" value={data.res_env_wdg || ''} onChange={(e) => handleFieldChange('res_env_wdg', e.target.value)} />
           </div>
           <div className="flex flex-col gap-1">
-            <span className="text-[10px] font-bold text-industrial-text-muted uppercase">Core Temp (°C)</span>
+            <span className="text-[10px] font-bold text-industrial-text-muted uppercase">Core Temp (Â°C)</span>
             <input type="text" className="bg-white border border-industrial-border rounded p-2 text-sm font-bold outline-none focus:border-industrial-accent" value={data.res_env_core || ''} onChange={(e) => handleFieldChange('res_env_core', e.target.value)} />
           </div>
           <div className="flex flex-col gap-1">
-            <span className="text-[10px] font-bold text-industrial-text-muted uppercase">Ambient Temp (°C)</span>
+            <span className="text-[10px] font-bold text-industrial-text-muted uppercase">Ambient Temp (Â°C)</span>
             <input type="text" className="bg-white border border-industrial-border rounded p-2 text-sm font-bold outline-none focus:border-industrial-accent" value={data.res_env_ambient || ''} onChange={(e) => handleFieldChange('res_env_ambient', e.target.value)} />
           </div>
           <div className="flex flex-col gap-1">
@@ -3821,15 +3848,15 @@ function PreConnectionTestForm({ test, job, onUpdate }: { test: TransformerTest,
               <tr>
                 <th className="p-4 border-r border-b border-industrial-border text-left">TEMINALS</th>
                 <th className="p-4 border-r border-b border-industrial-border text-center">
-                  <div>Measured Resistance (Ω)</div>
+                  <div>Measured Resistance (Î©)</div>
                 </th>
                 <th className="p-4 border-r border-b border-industrial-border text-center bg-orange-50 text-orange-800">
-                  <div>Resistance @75°C</div>
-                  <div className="text-[10px] font-bold text-orange-800 mt-1">Ω</div>
+                  <div>Resistance @75Â°C</div>
+                  <div className="text-[10px] font-bold text-orange-800 mt-1">Î©</div>
                 </th>
                 <th className="p-4 border-b border-industrial-border text-center">
-                  <div>MAX. GUARANTEED @75°C</div>
-                  <div className="text-[10px] font-bold text-industrial-text-muted mt-1">Ω</div>
+                  <div>MAX. GUARANTEED @75Â°C</div>
+                  <div className="text-[10px] font-bold text-industrial-text-muted mt-1">Î©</div>
                 </th>
               </tr>
             </thead>
@@ -4067,13 +4094,13 @@ function FinalLVTestForm({ test, job, onUpdate }: { test: TransformerTest, job?:
       }
     }
 
-    // Auto calculate lv winding resistance @ 75°C on mount
+    // Auto calculate lv winding resistance @ 75Â°C on mount
     const wrWindingResChanged = calculateLVWindingResistance(updated);
     if (wrWindingResChanged) {
       changed = true;
     }
 
-    // Auto calculate winding tan delta @ 20°C on mount
+    // Auto calculate winding tan delta @ 20Â°C on mount
     const windingTanDeltaChanged = calculateLVWindingTanDelta(updated);
     if (windingTanDeltaChanged) {
       changed = true;
@@ -4213,7 +4240,7 @@ function FinalLVTestForm({ test, job, onUpdate }: { test: TransformerTest, job?:
       }
     }
 
-    // Auto calculate winding tan delta @ 20°C: MF * TAN DELTA (%)
+    // Auto calculate winding tan delta @ 20Â°C: MF * TAN DELTA (%)
     if (
       key === 'lv_td_winding_mf' ||
       key === 'lv_td_winding_5_tan' ||
@@ -4222,7 +4249,7 @@ function FinalLVTestForm({ test, job, onUpdate }: { test: TransformerTest, job?:
       calculateLVWindingTanDelta(updated);
     }
 
-    // Auto calculate winding resistance @ 75°C for Final LV Report
+    // Auto calculate winding resistance @ 75Â°C for Final LV Report
     if (
       key === 'lv_wr_avg_oil' ||
       key === 'lv_wr_top_oil' ||
@@ -4252,12 +4279,12 @@ function FinalLVTestForm({ test, job, onUpdate }: { test: TransformerTest, job?:
             <div className="grid grid-cols-2 gap-4">
               <Field id="lv_date" type="date" label="Date" />
               <Field id="lv_time" type="time" label="Time" />
-              <Field id="lv_amb_temp" label="Amb. Temp (⁰C)" />
+              <Field id="lv_amb_temp" label="Amb. Temp (â°C)" />
               <Field id="lv_humidity" label="Relative Humidity (%)" />
-              <Field id="lv_top_oil_temp" label="Top Oil Temp (⁰C)" />
-              <Field id="lv_bottom_oil_temp" label="Bottom oil Temp (⁰C)" />
+              <Field id="lv_top_oil_temp" label="Top Oil Temp (â°C)" />
+              <Field id="lv_bottom_oil_temp" label="Bottom oil Temp (â°C)" />
               <div className="col-span-2">
-                <Field id="lv_avg_oil_temp" label="Avg oil Temp (⁰C)" readOnly={true} className="bg-slate-50 font-bold" />
+                <Field id="lv_avg_oil_temp" label="Avg oil Temp (â°C)" readOnly={true} className="bg-slate-50 font-bold" />
               </div>
             </div>
           </div>
@@ -4280,8 +4307,8 @@ function FinalLVTestForm({ test, job, onUpdate }: { test: TransformerTest, job?:
               <thead className="bg-[#f8fafc] text-industrial-text-muted uppercase">
                 <tr>
                   <th className="p-4 border-r border-b border-industrial-border text-left">Description</th>
-                  <th className="p-4 border-r border-b border-industrial-border text-center">15 Sec (MΩ)</th>
-                  <th className="p-4 border-r border-b border-industrial-border text-center">60 Sec (MΩ)</th>
+                  <th className="p-4 border-r border-b border-industrial-border text-center">15 Sec (Mâ„¦)</th>
+                  <th className="p-4 border-r border-b border-industrial-border text-center">60 Sec (Mâ„¦)</th>
                   <th className="p-4 border-b border-industrial-border text-center">Ratio of 60 Sec/ 15 Sec</th>
                 </tr>
               </thead>
@@ -4302,17 +4329,17 @@ function FinalLVTestForm({ test, job, onUpdate }: { test: TransformerTest, job?:
                 <tr className="border-b border-industrial-border">
                   <td className="p-4 border-r border-industrial-border font-bold bg-industrial-bg/10 text-right w-1/2">core to frame :</td>
                   <td className="p-1 border-r border-industrial-border w-1/3"><Field id="lv_ir_core_to_frame" placeholder="" /></td>
-                  <td className="p-4 text-center font-bold text-industrial-text-muted bg-industrial-bg/10 w-1/6">(MΩ)</td>
+                  <td className="p-4 text-center font-bold text-industrial-text-muted bg-industrial-bg/10 w-1/6">(Mâ„¦)</td>
                 </tr>
                 <tr className="border-b border-industrial-border">
                   <td className="p-4 border-r border-industrial-border font-bold bg-industrial-bg/10 text-right">core to tank :</td>
                   <td className="p-1 border-r border-industrial-border"><Field id="lv_ir_core_to_tank" placeholder="" /></td>
-                  <td className="p-4 text-center font-bold text-industrial-text-muted bg-industrial-bg/10">(MΩ)</td>
+                  <td className="p-4 text-center font-bold text-industrial-text-muted bg-industrial-bg/10">(Mâ„¦)</td>
                 </tr>
                 <tr>
                   <td className="p-4 border-r border-industrial-border font-bold bg-industrial-bg/10 text-right">frame to tank :</td>
                   <td className="p-1 border-r border-industrial-border"><Field id="lv_ir_frame_to_tank" placeholder="" /></td>
-                  <td className="p-4 text-center font-bold text-industrial-text-muted bg-industrial-bg/10">(MΩ)</td>
+                  <td className="p-4 text-center font-bold text-industrial-text-muted bg-industrial-bg/10">(Mâ„¦)</td>
                 </tr>
               </tbody>
             </table>
@@ -4656,25 +4683,25 @@ function FinalLVTestForm({ test, job, onUpdate }: { test: TransformerTest, job?:
                   <Field id="lv_wr_meter_sr_no" pdfValue="PE/040/MAR/2023" className="text-center mt-1" />
                 </td>
                 <td className="p-2 border-r border-industrial-border bg-white">
-                  <span className="font-bold">TOP OIL TEMP °C :</span>
+                  <span className="font-bold">TOP OIL TEMP Â°C :</span>
                   <Field id="lv_wr_top_oil" placeholder="" className="text-center mt-1" />
                 </td>
                 <td className="p-2 bg-white">
-                  <span className="font-bold">BOTTOM OIL TEMP °C :</span>
+                  <span className="font-bold">BOTTOM OIL TEMP Â°C :</span>
                   <Field id="lv_wr_bottom_oil" placeholder="" className="text-center mt-1" />
                 </td>
               </tr>
               <tr>
                 <td className="p-2 border-r border-industrial-border bg-white">
                   <span className="font-bold">RANGE :</span>
-                  <Field id="lv_wr_range" pdfValue="1999.9 μΩ-19.999Ω" className="text-center mt-1" />
+                  <Field id="lv_wr_range" pdfValue="1999.9 Î¼Î©-19.999Î©" className="text-center mt-1" />
                 </td>
                 <td className="p-2 border-r border-industrial-border bg-white">
-                  <span className="font-bold">AMBIENT °C :</span>
+                  <span className="font-bold">AMBIENT Â°C :</span>
                   <Field id="lv_wr_ambient" placeholder="" className="text-center mt-1" />
                 </td>
                 <td className="p-2 bg-white">
-                  <span className="font-bold">AVERAGE OIL TEMP °C :</span>
+                  <span className="font-bold">AVERAGE OIL TEMP Â°C :</span>
                   <Field id="lv_wr_avg_oil" placeholder="" readOnly={true} className="text-center mt-1 bg-slate-50 font-bold" />
                 </td>
               </tr>
@@ -4684,7 +4711,7 @@ function FinalLVTestForm({ test, job, onUpdate }: { test: TransformerTest, job?:
             <tbody>
               <tr>
                 <td className="p-2 border-r border-industrial-border bg-white w-1/2">
-                  <span className="font-bold">Avg. Oil Temp °C :</span>
+                  <span className="font-bold">Avg. Oil Temp Â°C :</span>
                   <Field id="lv_wr_avg_oil" placeholder="" readOnly={true} className="text-center mt-1 bg-slate-50 font-bold max-w-xs" />
                 </td>
                 <td className="p-2 bg-white w-1/2">
@@ -4701,15 +4728,15 @@ function FinalLVTestForm({ test, job, onUpdate }: { test: TransformerTest, job?:
               <tr>
                 <th className="p-3 border-r border-b border-industrial-border text-left font-black">TEMINALS</th>
                 <th className="p-3 border-r border-b border-industrial-border text-center font-black">
-                  <div>Measured Resistance (Ω)</div>
+                  <div>Measured Resistance (Î©)</div>
                 </th>
                 <th className="p-3 border-r border-b border-industrial-border text-center bg-orange-50/60 text-orange-800 font-black">
-                  <div>RESISTANCE @75°C</div>
-                  <div className="text-[10px] font-normal text-orange-500">Ω</div>
+                  <div>RESISTANCE @75Â°C</div>
+                  <div className="text-[10px] font-normal text-orange-500">â„¦</div>
                 </th>
                 <th className="p-3 border-b border-industrial-border text-center font-black">
-                  <div>MAX. GUARANTEED @75°C</div>
-                  <div className="text-[10px] font-normal text-slate-400">Ω</div>
+                  <div>MAX. GUARANTEED @75Â°C</div>
+                  <div className="text-[10px] font-normal text-slate-400">â„¦</div>
                 </th>
               </tr>
             </thead>
@@ -4776,17 +4803,17 @@ function FinalLVTestForm({ test, job, onUpdate }: { test: TransformerTest, job?:
           <table className="w-full text-xs font-mono border-x border-b border-industrial-border border-collapse">
             <tbody>
               <tr>
-                <td className="p-2 bg-slate-50 border-r border-industrial-border font-bold text-right pr-2 w-[10%]">Top Oil(°C):</td>
+                <td className="p-2 bg-slate-50 border-r border-industrial-border font-bold text-right pr-2 w-[10%]">Top Oil(Â°C):</td>
                 <td className="p-1 border-r border-industrial-border bg-white w-[15%]"><Field id="lv_td_top_oil" placeholder="" className="text-center" /></td>
-                <td className="p-2 bg-slate-50 border-r border-industrial-border font-bold text-right pr-2 w-[12%]">Bottom Oil(°C):</td>
+                <td className="p-2 bg-slate-50 border-r border-industrial-border font-bold text-right pr-2 w-[12%]">Bottom Oil(Â°C):</td>
                 <td className="p-1 border-r border-industrial-border bg-white w-[13%]"><Field id="lv_td_bottom_oil" placeholder="" className="text-center" /></td>
-                <td className="p-2 bg-slate-50 border-r border-industrial-border font-bold text-right pr-2 w-[15%]">Amb. Temp.(°C):</td>
+                <td className="p-2 bg-slate-50 border-r border-industrial-border font-bold text-right pr-2 w-[15%]">Amb. Temp.(Â°C):</td>
                 <td className="p-1 border-r border-industrial-border bg-white w-[10%]"><Field id="lv_td_amb_temp" placeholder="" className="text-center" /></td>
                 <td className="p-2 bg-slate-50 border-r border-industrial-border font-bold text-right pr-2 w-[10%]">Humi.(%):</td>
                 <td className="p-1 bg-white w-[15%]"><Field id="lv_td_humi" placeholder="" className="text-center" /></td>
               </tr>
               <tr>
-                <td className="p-2 bg-slate-50 border-r border-industrial-border font-bold text-right pr-2">Avg. Temp (°C) :</td>
+                <td className="p-2 bg-slate-50 border-r border-industrial-border font-bold text-right pr-2">Avg. Temp (Â°C) :</td>
                 <td className="p-1 border-r border-industrial-border bg-white" colSpan={7}><Field id="lv_td_avg_temp" placeholder="" readOnly={true} className="text-center max-w-xs bg-slate-50 font-bold" /></td>
               </tr>
             </tbody>
@@ -4925,7 +4952,7 @@ function FinalLVTestForm({ test, job, onUpdate }: { test: TransformerTest, job?:
                 <th className="p-3 border-r border-industrial-border text-center text-slate-700 uppercase tracking-wider">CAPACITANCE <span className="normal-case font-sans font-normal">(pf)</span></th>
                 <th className="p-3 border-r border-industrial-border text-center text-slate-700 uppercase tracking-wider bg-slate-100">EXCITATION CURRENT <span className="normal-case font-sans font-normal">(mA)</span></th>
                 <th className="p-3 border-r border-industrial-border text-center text-slate-700 uppercase tracking-wider">DIELECTRIC LOSS (W)</th>
-                <th className="p-3 text-center text-slate-700 uppercase tracking-wider">TanΔ (%) at 20 °C</th>
+                <th className="p-3 text-center text-slate-700 uppercase tracking-wider">TanÎ” (%) at 20 Â°C</th>
               </tr>
             </thead>
             <tbody>
@@ -5013,7 +5040,7 @@ function FinalLVTestForm({ test, job, onUpdate }: { test: TransformerTest, job?:
                 <td className="p-1 bg-white text-center"><Field id="lv_pi_range" placeholder="1-TO-5 Kv" className="text-center" /></td>
               </tr>
               <tr className="border-b border-industrial-border">
-                <td className="p-2 bg-slate-50 border-r border-industrial-border font-bold text-center">Avg. Oil Temp (⁰C):</td>
+                <td className="p-2 bg-slate-50 border-r border-industrial-border font-bold text-center">Avg. Oil Temp (â°C):</td>
                 <td className="p-1 border-r border-industrial-border bg-slate-50 text-center"><Field id="lv_pi_avg_oil" placeholder="" readOnly={true} className="text-center font-bold bg-slate-50" /></td>
                 <td className="p-2 bg-slate-50 border-r border-industrial-border font-bold text-center" colSpan={2}>Voltage Level (V):</td>
                 <td className="p-1 bg-white text-center"><Field id="lv_pi_applied" placeholder="" className="text-center" /></td>
@@ -5268,11 +5295,11 @@ function PrePostVpdServicingForm({ test, onUpdate }: { test: TransformerTest, on
                  <Field id={`${process.toLowerCase()}_time`} type="time" placeholder="HH:MM" />
                </div>
                <div className="flex flex-col gap-1">
-                 <span className="text-[10px] font-bold text-industrial-text-muted uppercase">Amb. Temp (⁰C)</span>
+                 <span className="text-[10px] font-bold text-industrial-text-muted uppercase">Amb. Temp (â°C)</span>
                  <Field id={`${process.toLowerCase()}_amb_temp`} />
                </div>
                <div className="flex flex-col gap-1">
-                 <span className="text-[10px] font-bold text-industrial-text-muted uppercase">Wdg. Temp. (⁰C)</span>
+                 <span className="text-[10px] font-bold text-industrial-text-muted uppercase">Wdg. Temp. (â°C)</span>
                  <Field id={`${process.toLowerCase()}_wdg_temp`} />
                </div>
                <div className="flex flex-col gap-1">
@@ -5280,7 +5307,7 @@ function PrePostVpdServicingForm({ test, onUpdate }: { test: TransformerTest, on
                  <Field id={`${process.toLowerCase()}_humidity`} />
                </div>
                <div className="flex flex-col gap-1">
-                 <span className="text-[10px] font-bold text-industrial-text-muted uppercase">Core Temp. (⁰C)</span>
+                 <span className="text-[10px] font-bold text-industrial-text-muted uppercase">Core Temp. (â°C)</span>
                  <Field id={`${process.toLowerCase()}_core_temp`} />
                </div>
             </div>
@@ -5290,8 +5317,8 @@ function PrePostVpdServicingForm({ test, onUpdate }: { test: TransformerTest, on
                  <thead>
                    <tr className="bg-[#f8fafc] text-industrial-text-muted uppercase border-b border-industrial-border">
                      <th className="p-4 border-r border-industrial-border text-left font-bold w-1/4">COMBINATION</th>
-                     <th className="p-4 border-r border-industrial-border text-center font-bold w-1/4">15 SEC (MΩ)</th>
-                     <th className="p-4 border-r border-industrial-border text-center font-bold w-1/4">60 SEC (MΩ)</th>
+                     <th className="p-4 border-r border-industrial-border text-center font-bold w-1/4">15 SEC (MÎ©)</th>
+                     <th className="p-4 border-r border-industrial-border text-center font-bold w-1/4">60 SEC (MÎ©)</th>
                      <th className="p-4 text-center font-bold w-1/4">RATIO (60/15S)</th>
                    </tr>
                  </thead>
@@ -5313,14 +5340,14 @@ function PrePostVpdServicingForm({ test, onUpdate }: { test: TransformerTest, on
             </div>
 
             <div className="border border-industrial-border rounded-xl overflow-hidden">
-              <div className="bg-industrial-bg/50 px-4 py-2 border-b border-industrial-border font-bold text-xs uppercase">MAGNETISING CURRENT TEST (1Φ 200V)</div>
+              <div className="bg-industrial-bg/50 px-4 py-2 border-b border-industrial-border font-bold text-xs uppercase">MAGNETISING CURRENT TEST (1Î¦ 200V)</div>
               <table className="w-full text-[10px] font-mono">
                 <thead className="bg-[#f8fafc] text-industrial-text-muted">
                   <tr className="border-b border-industrial-border">
                     <th className="p-3 border-r text-left w-1/3"></th>
                     <th className="p-3 border-r text-center w-1/3 font-bold text-xs">
                       Applied Voltage (V)<br />
-                      <span className="text-[10px] font-normal uppercase tracking-tight">(1Φ 200 VOLT APPLIED )</span>
+                      <span className="text-[10px] font-normal uppercase tracking-tight">(1Î¦ 200 VOLT APPLIED )</span>
                     </th>
                     <th className="p-3 text-center w-1/3 font-bold text-xs">
                       Measured Current (mA)
@@ -5445,10 +5472,10 @@ function OilSoakingServicingForm({ test, onUpdate }: { test: TransformerTest, on
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 bg-industrial-bg/5 p-4 rounded-lg border border-industrial-border">
              <Field id={`${stage.toLowerCase()}_date`} type="date" label="Date" placeholder="DD/MM/YYYY" />
              <Field id={`${stage.toLowerCase()}_time`} type="time" label="Time" placeholder="HH:MM" />
-             <Field id={`${stage.toLowerCase()}_amb_temp`} label="Amb. Temp (⁰C)" />
-             <Field id={`${stage.toLowerCase()}_wdg_temp`} label="Wdg. Temp (⁰C)" />
+             <Field id={`${stage.toLowerCase()}_amb_temp`} label="Amb. Temp (â°C)" />
+             <Field id={`${stage.toLowerCase()}_wdg_temp`} label="Wdg. Temp (â°C)" />
              <Field id={`${stage.toLowerCase()}_humidity`} label="Relative Humidity (%)" />
-             <Field id={`${stage.toLowerCase()}_core_temp`} label="Core Temp (⁰C)" />
+             <Field id={`${stage.toLowerCase()}_core_temp`} label="Core Temp (â°C)" />
           </div>
 
           <div className="border border-industrial-border rounded-xl overflow-hidden shadow-sm">
@@ -5458,7 +5485,7 @@ function OilSoakingServicingForm({ test, onUpdate }: { test: TransformerTest, on
                    <th className="p-4 border-r border-b border-industrial-border text-left"></th>
                    <th className="p-4 border-r border-b border-industrial-border text-center normal-case">voltage applied (kV)</th>
                    <th className="p-4 border-r border-b border-industrial-border text-center">Duration (Sec)</th>
-                   <th className="p-4 border-b border-industrial-border text-center">MΩ</th>
+                   <th className="p-4 border-b border-industrial-border text-center">Mâ„¦</th>
                 </tr>
               </thead>
               <tbody>
@@ -5560,7 +5587,7 @@ export default function App() {
   }>({});
   const [jobName, setJobName] = useState('');
 
-  // Restore session + load jobs from API (backend only — no offline/localStorage jobs)
+  // Restore session + load jobs from API (backend only â€” no offline/localStorage jobs)
   useEffect(() => {
     let cancelled = false;
     clearLegacyLocalData();
@@ -5646,7 +5673,7 @@ export default function App() {
   }, [toast]);
 
   const serializePrintableReport = (root: HTMLElement) => {
-    // Read live control values before clone — cloneNode can drop <select> selected state.
+    // Read live control values before clone â€” cloneNode can drop <select> selected state.
     const liveSelectTexts = Array.from(root.querySelectorAll('select')).map(el => {
       const select = el as HTMLSelectElement;
       if (!select.value) return '-';
@@ -5656,7 +5683,7 @@ export default function App() {
     const liveInputValues = Array.from(root.querySelectorAll('input, textarea')).map(el => {
       const input = el as HTMLInputElement | HTMLTextAreaElement;
       if (input instanceof HTMLInputElement && input.type === 'checkbox') {
-        return input.checked ? '✓' : '-';
+        return input.checked ? 'âœ“' : '-';
       }
       return input.value || '-';
     });
@@ -5678,10 +5705,10 @@ export default function App() {
       const replacement = document.createElement('div');
       replacement.className = input.className || 'p-2 text-sm font-bold text-center';
       if (input instanceof HTMLInputElement && input.type === 'checkbox') {
-        const checked = (liveInputValues[i] ?? '-') === '✓';
+        const checked = (liveInputValues[i] ?? '-') === 'âœ“';
         replacement.className = 'flex items-center justify-center';
         replacement.innerHTML = checked
-          ? '<span style="display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border:2px solid #2563eb;border-radius:4px;background:#2563eb;color:#fff;font-weight:700;font-size:12px;line-height:1;">✓</span>'
+          ? '<span style="display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border:2px solid #2563eb;border-radius:4px;background:#2563eb;color:#fff;font-weight:700;font-size:12px;line-height:1;">âœ“</span>'
           : '<span style="display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border:2px solid #cbd5e1;border-radius:4px;background:#fff;"></span>';
       } else {
         replacement.textContent = liveInputValues[i] ?? '-';
@@ -5768,7 +5795,7 @@ ${PDF_PRINT_STYLES}
   <div class="no-print">
     <div>
       <h4 style="margin: 0; font-size: 16px; font-weight: 700; color: #0f172a;">Print-Ready Report</h4>
-      <p style="margin: 4px 0 0 0; font-size: 12px; color: #64748b;">Matches on-screen UI casing and layout. Use Print → Save as PDF.</p>
+      <p style="margin: 4px 0 0 0; font-size: 12px; color: #64748b;">Matches on-screen UI casing and layout. Use Print â†’ Save as PDF.</p>
     </div>
     <button class="print-btn" onclick="window.print()">Print Report</button>
   </div>
@@ -5814,7 +5841,7 @@ ${PDF_PRINT_STYLES}
     setEditingTestId(test.id);
     setView('TEST_REPORT');
     setToast({
-      message: 'Opening report UI for exact PDF download…',
+      message: 'Opening report UI for exact PDF downloadâ€¦',
       type: 'info',
     });
   };
@@ -6176,7 +6203,7 @@ ${PDF_PRINT_STYLES}
       setToast({
         message:
           unread > 0
-            ? `Logged in as ${result.user.name} (${result.user.role}) — ${unread} notification${unread === 1 ? '' : 's'}`
+            ? `Logged in as ${result.user.name} (${result.user.role}) â€” ${unread} notification${unread === 1 ? '' : 's'}`
             : `Logged in as ${result.user.name} (${result.user.role})`,
         type: 'success',
       });
@@ -6579,28 +6606,6 @@ ${PDF_PRINT_STYLES}
       }
     };
 
-<<<<<<< HEAD
-    if (offlineMode || isOfflineMode()) {
-      const result = updateLocalStage(jobId, testId, targetStage, 'promote');
-      if (!result) {
-        setToast({ message: 'Job or test not found', type: 'error' });
-        return false;
-      }
-      if (result.error) {
-        setToast({ message: result.error, type: 'error' });
-        return false;
-      }
-      upsertJob(result.job);
-      emitStageNotifications(result.job);
-      if (result.openTestId) {
-        setEditingTestId(result.openTestId);
-        setView('TEST_REPORT');
-      }
-      return true;
-    }
-
-=======
->>>>>>> bf38805e7b6b5b32d69b61eb0fa06c47de02ec68
     try {
       const { job: updatedJob, openTestId } = await api.updateStage(jobId, testId, {
         stage: targetStage,
@@ -6614,26 +6619,6 @@ ${PDF_PRINT_STYLES}
       }
       return true;
     } catch (err) {
-<<<<<<< HEAD
-      if (isNetworkError(err)) {
-        enableOfflineMode(false);
-        const result = updateLocalStage(jobId, testId, targetStage, 'promote');
-        if (result?.error) {
-          setToast({ message: result.error, type: 'error' });
-          return false;
-        }
-        if (result) {
-          upsertJob(result.job);
-          emitStageNotifications(result.job);
-          if (result.openTestId) {
-            setEditingTestId(result.openTestId);
-            setView('TEST_REPORT');
-          }
-          return true;
-        }
-      }
-=======
->>>>>>> bf38805e7b6b5b32d69b61eb0fa06c47de02ec68
       setToast({
         message: err instanceof Error ? err.message : 'Stage update failed',
         type: 'error',
@@ -6836,21 +6821,10 @@ ${PDF_PRINT_STYLES}
   };
 
   const persistObservation = async (jobId: string, testId: string, data: Record<string, string>) => {
-    if (offlineMode || isOfflineMode()) {
-      const updated = updateLocalObservation(jobId, testId, data);
-      if (updated) upsertJob(updated.job);
-      return;
-    }
     try {
       const { job } = await api.updateObservation(jobId, testId, data);
       upsertJob(job);
     } catch (err) {
-      if (isNetworkError(err)) {
-        enableOfflineMode(false);
-        const updated = updateLocalObservation(jobId, testId, data);
-        if (updated) upsertJob(updated.job);
-        return;
-      }
       setToast({
         message: err instanceof Error ? err.message : 'Failed to save observations',
         type: 'error',
@@ -6871,13 +6845,11 @@ ${PDF_PRINT_STYLES}
   };
 
   const handleUpdateTestData = async (jobId: string, testId: string, data: Record<string, string>) => {
-<<<<<<< HEAD
     const previousTest = jobs.find(j => j.id === jobId)?.tests.find(t => t.id === testId);
     const previousData = previousTest?.observationData || {};
     const signOffChanged = Object.keys({ ...previousData, ...data }).some(
       k => k.endsWith('_by') && (previousData[k] || '') !== (data[k] || '')
     );
-=======
     const sourceJob = jobs.find(j => j.id === jobId);
     const sourceTest = sourceJob?.tests.find(t => t.id === testId);
     const previous = sourceTest?.observationData || {};
@@ -6924,7 +6896,6 @@ ${PDF_PRINT_STYLES}
         }
       }
     }
->>>>>>> bf38805e7b6b5b32d69b61eb0fa06c47de02ec68
 
     setJobs(prev => prev.map(job => {
       if (job.id !== jobId) return job;
@@ -6944,7 +6915,7 @@ ${PDF_PRINT_STYLES}
       delete observationSaveTimers.current[key];
     }
 
-    // Sign-off selections are discrete picks, not typing — persist them right away
+    // Sign-off selections are discrete picks, not typing â€” persist them right away
     // so job status is recomputed and the save cannot be lost on navigation.
     if (signOffChanged) {
       delete pendingObservationData.current[key];
@@ -6954,21 +6925,9 @@ ${PDF_PRINT_STYLES}
 
     pendingObservationData.current[key] = data;
     observationSaveTimers.current[key] = setTimeout(async () => {
-<<<<<<< HEAD
       delete observationSaveTimers.current[key];
       delete pendingObservationData.current[key];
       await persistObservation(jobId, testId, data);
-=======
-      try {
-        const { job } = await api.updateObservation(jobId, testId, data);
-        upsertJob(job);
-      } catch (err) {
-        setToast({
-          message: err instanceof Error ? err.message : 'Failed to save observations',
-          type: 'error',
-        });
-      }
->>>>>>> bf38805e7b6b5b32d69b61eb0fa06c47de02ec68
     }, 400);
   };
 
@@ -7130,7 +7089,7 @@ ${PDF_PRINT_STYLES}
                   value={rejectConfirm.note}
                   onChange={(e) => setRejectConfirm({ ...rejectConfirm, note: e.target.value })}
                   rows={4}
-                  placeholder="Explain the reason for rejection…"
+                  placeholder="Explain the reason for rejectionâ€¦"
                   className="w-full bg-industrial-bg border border-industrial-border rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-rose-400 transition-colors resize-y min-h-[96px]"
                 />
                 <p className="mt-1.5 text-[11px] text-industrial-text-muted">
@@ -7190,7 +7149,7 @@ ${PDF_PRINT_STYLES}
                   <h3 className="text-base font-bold text-industrial-text">Delete staff?</h3>
                   <p className="text-sm text-industrial-text-muted leading-relaxed">
                     Remove <span className="font-semibold text-industrial-text">{deleteStaffConfirm.name}</span>
-                    {' '}({deleteStaffConfirm.role}) — username <span className="font-mono">{deleteStaffConfirm.username}</span>?
+                    {' '}({deleteStaffConfirm.role}) â€” username <span className="font-mono">{deleteStaffConfirm.username}</span>?
                     They will no longer be able to log in.
                   </p>
                 </div>
@@ -7969,7 +7928,7 @@ ${PDF_PRINT_STYLES}
                               <div>
                                 <div className="font-medium text-sm">{job.name}</div>
                                 <div className="text-[10px] text-industrial-text-muted uppercase font-mono tracking-tight">
-                                  {job.capacity} • {job.type} • {new Date(job.createdAt).toLocaleDateString()}
+                                  {job.capacity} â€¢ {job.type} â€¢ {new Date(job.createdAt).toLocaleDateString()}
                                 </div>
                                 {processingTests.length > 0 && (
                                   <div className="mt-1.5 flex items-center gap-1.5 text-[10px] font-semibold text-amber-600 bg-amber-500/5 px-2 py-0.5 rounded border border-amber-500/10 w-fit max-w-[280px] sm:max-w-md">
@@ -8571,9 +8530,9 @@ ${PDF_PRINT_STYLES}
                   <h2 className="text-2xl font-semibold mb-1">{selectedJob.name}</h2>
                   <div className="flex gap-2 text-xs font-mono text-industrial-text-muted">
                     <span>{selectedJob.capacity}</span>
-                    <span>•</span>
+                    <span>â€¢</span>
                     <span>{selectedJob.type}</span>
-                    <span>•</span>
+                    <span>â€¢</span>
                     <span>ID: {selectedJob.id.slice(0,8)}</span>
                   </div>
                 </div>
@@ -8601,11 +8560,11 @@ ${PDF_PRINT_STYLES}
                     <div className="text-right">
                       <div className="text-[10px] uppercase tracking-widest text-industrial-accent font-bold">Overall Progress</div>
                       <div className="text-sm font-bold text-industrial-accent">
-                        {selectedJob.tests.filter(t => t.stage === 'Reviewed' && t.accepted !== false).length} / {selectedJob.tests.filter(t => t.accepted !== false).length || 1} COMPLETE
+                        {jobProgress(selectedJob.tests).authorized} / {jobProgress(selectedJob.tests).total || 1} AUTHORIZED
                       </div>
                     </div>
                     <div className="w-10 h-10 rounded-full border-2 border-industrial-accent flex items-center justify-center font-mono text-xs font-bold text-industrial-accent">
-                      {Math.round((selectedJob.tests.filter(t => t.stage === 'Reviewed' && t.accepted !== false).length / (selectedJob.tests.filter(t => t.accepted !== false).length || 1)) * 100)}%
+                      {jobProgress(selectedJob.tests).percent}%
                     </div>
                   </div>
                 </div>
@@ -8705,7 +8664,7 @@ ${PDF_PRINT_STYLES}
                                 )}
                                 {getRejectionNote(test) && (
                                   <span className="px-2 py-0.5 bg-rose-100 text-rose-700 text-[10px] font-bold rounded uppercase border border-rose-200">
-                                    Rejected — Note Added
+                                    Rejected â€” Note Added
                                   </span>
                                 )}
                               </div>
@@ -8723,12 +8682,12 @@ ${PDF_PRINT_STYLES}
                                     <p className="font-bold uppercase tracking-wider text-[10px] text-rose-700">
                                       Rejection note
                                       {rejection.fromStage && rejection.toStage
-                                        ? ` (${rejection.fromStage} → ${rejection.toStage})`
+                                        ? ` (${rejection.fromStage} â†’ ${rejection.toStage})`
                                         : ''}
                                     </p>
                                     <p className="leading-relaxed whitespace-pre-wrap">{rejection.note}</p>
                                     <p className="text-[10px] text-rose-700/80 font-mono">
-                                      By {rejection.by}{rejection.at ? ` · ${rejection.at}` : ''}
+                                      By {rejection.by}{rejection.at ? ` Â· ${rejection.at}` : ''}
                                     </p>
                                   </div>
                                 );
@@ -8996,12 +8955,12 @@ ${PDF_PRINT_STYLES}
                       <h3 className="text-sm font-bold uppercase tracking-wider text-rose-700">
                         Rejection note
                         {rejection.fromStage && rejection.toStage
-                          ? ` · ${rejection.fromStage} → ${rejection.toStage}`
+                          ? ` Â· ${rejection.fromStage} â†’ ${rejection.toStage}`
                           : ''}
                       </h3>
                       <p className="text-sm leading-relaxed whitespace-pre-wrap">{rejection.note}</p>
                       <p className="text-[11px] font-mono text-rose-700/80">
-                        By {rejection.by}{rejection.at ? ` · ${rejection.at}` : ''}
+                        By {rejection.by}{rejection.at ? ` Â· ${rejection.at}` : ''}
                       </p>
                     </div>
                   </div>
